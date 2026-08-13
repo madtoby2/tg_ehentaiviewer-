@@ -43,7 +43,12 @@ class TraceMoeTests(unittest.TestCase):
 
     def test_low_similarity_filtered(self):
         d = {"result": [{**SAMPLE["result"][0], "similarity": .2}]}
-        self.assertEqual(trace_moe.parse_results(d, min_similarity=.60), [])
+        self.assertEqual(trace_moe.parse_results(d), [])
+
+    def test_weak_77_percent_false_positive_filtered(self):
+        """Real AV/general screenshots can receive bogus ~78% anime candidates."""
+        d = {"result": [{**SAMPLE["result"][0], "similarity": .778}]}
+        self.assertEqual(trace_moe.parse_results(d), [])
 
     def test_search_uploads_file(self):
         with tempfile.NamedTemporaryFile(suffix='.jpg') as f:

@@ -12,7 +12,7 @@ def _clock(seconds: float) -> str:
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
-def parse_results(data: dict, min_similarity: float = 0.60) -> list[dict]:
+def parse_results(data: dict, min_similarity: float = 0.87) -> list[dict]:
     raw = data.get("result", []) if isinstance(data, dict) else []
     # trace.moe always returns nearest neighbors, even for unrelated photos.
     # If two different anime tie at the top, this is not a trustworthy match.
