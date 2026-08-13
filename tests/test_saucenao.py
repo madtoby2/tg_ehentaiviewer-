@@ -155,6 +155,7 @@ class PhotoHandlerTests(unittest.TestCase):
         fake_file.download_to_drive = mock.AsyncMock()
         ctx.bot.get_file = mock.AsyncMock(return_value=fake_file)
         ctx.bot.send_media_group = mock.AsyncMock()
+        ctx.bot.send_photo = mock.AsyncMock()
         return ctx
 
     def test_no_api_key_uses_free_iqdb_only(self):
@@ -292,6 +293,22 @@ class PhotoHandlerTests(unittest.TestCase):
         self.assertIn('Match 0', media[0].caption)
         # Files are closed and the outer finally removes the entire task dir.
         self.assertEqual([p for p in Path('/tmp').glob('ris_*') if p.is_dir()], [])
+
+    def test_single_yandex_preview_uses_send_photo(self):
+        self._reload(EHBOT_TELEGRAM_TOKEN='x')
+        update=self._photo_update(); ctx=self._ctx()
+        site={'title':'One','domain':'src.test','url':'https://src.test/1','image_url':'https://img.test/1.jpg'}
+        def fake_download(_sites,directory,limit=4):
+            Path(directory).mkdir(parents=True,exist_ok=True); p=Path(directory)/'one.jpg'; p.write_bytes(b'jpeg')
+            return [{**site,'path':str(p)}]
+        with mock.patch('bot.iqdb_search',return_value=[]), mock.patch('bot.trace_moe_search',return_value=[]), \
+             mock.patch('bot.yandex_image_search',return_value={'search_url':'https://y.test','sites':[site]}), \
+             mock.patch('bot.screenshot_ocr',return_value=''), mock.patch('bot.yandex_download_previews',side_effect=fake_download), \
+             mock.patch.object(bot,'consume_daily_quota',return_value=(True,9)), \
+             mock.patch.object(Message,'reply_text',new=mock.AsyncMock()) as reply:
+            reply.return_value.edit_text=mock.AsyncMock(); asyncio.run(bot.handle_photo(update,ctx))
+        ctx.bot.send_photo.assert_awaited_once()
+        ctx.bot.send_media_group.assert_not_awaited()
 
     def test_group_photo_without_mention_silent(self):
         self._reload(EHBOT_GROUP_MODE="1", EHBOT_TELEGRAM_TOKEN="x", SAUCENAO_API_KEY="KEY")

@@ -730,7 +730,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                             f"{html.escape(item['url'])}"
                         )
                         media.append(InputMediaPhoto(media=fh, caption=caption, parse_mode='HTML'))
-                    await context.bot.send_media_group(chat_id=chat_id, media=media)
+                    if len(media) == 1:
+                        await context.bot.send_photo(
+                            chat_id=chat_id,
+                            photo=handles[0],
+                            caption=media[0].caption,
+                            parse_mode='HTML',
+                        )
+                    else:
+                        await context.bot.send_media_group(chat_id=chat_id, media=media)
                 finally:
                     for fh in handles:
                         fh.close()
