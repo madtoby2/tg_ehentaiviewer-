@@ -4,11 +4,13 @@
 # Runtime data
 usage_limits.json
 .hermes-tmp.*
+.telegraph_token.json
 
 # Python cache
 __pycache__/
 *.pyc
 .pytest_cache/
+.venv/
 
 # OS
 .DS_Store

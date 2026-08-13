@@ -1,0 +1,16 @@
+[Unit]
+Description=EH/18comic Reader Bot (hentaiviewer)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__DIR__
+ExecStart=__DIR__/.venv/bin/python bot.py
+Restart=always
+RestartSec=5
+# 从 .env 加载配置
+EnvironmentFile=__DIR__/.env
+
+[Install]
+WantedBy=multi-user.target

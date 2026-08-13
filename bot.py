@@ -15,6 +15,14 @@ from pathlib import Path
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
+# Load .env (cloned deployments: ./setup.sh generates it). Existing env vars
+# take precedence; .env does not override them.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent / '.env')
+except ImportError:
+    pass
+
 sys.path.insert(0, str(Path(__file__).parent))
 from scrapers.ehentai import scrape_gallery as scrape_eh, is_eh_link, scrape_metadata as scrape_eh_meta, search_eh
 from scrapers.comic18 import scrape_album as scrape_comic, is_comic_link, scrape_metadata as scrape_comic_meta, search_comic
@@ -1463,7 +1471,8 @@ def main():
     app = Application.builder().token(token).build()
 
     # APScheduler 默认 misfire_grace_time=1s，延迟几秒就跳过；设为 5 分钟容错
-    app.job_queue.scheduler.configure(misfire_grace_time=300)
+    if app.job_queue:
+        app.job_queue.scheduler.configure(misfire_grace_time=300)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("daily", daily_command))

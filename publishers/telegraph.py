@@ -25,8 +25,12 @@ MAX_IMAGES_PER_PAGE = 200
 # Delay between uploads to avoid rate limiting
 UPLOAD_DELAY = 1.0
 
-# Telegraph access token storage
-TOKEN_FILE = os.path.expanduser("~/.hermes/telegraph_token.json")
+# Telegraph access token storage. Overridable so cloned deployments can keep
+# the token inside the project dir instead of ~/.hermes.
+TOKEN_FILE = os.environ.get(
+    "EHBOT_TELEGRAPH_TOKEN_FILE",
+    os.path.expanduser("~/.hermes/telegraph_token.json"),
+)
 
 
 def load_token() -> str | None:

@@ -100,6 +100,42 @@ trigger_ranking.py            # 手动触发补发当日排行（ops 脚本）
 - 并发：群里按**用户**加锁（不同成员同时发链接互不等待），私聊按会话加锁
 - 群白名单为空 = 任何群可用；非空 = 仅限指定群
 
+## 克隆部署（一键安装到自己的机器）
+
+点 GitHub **Use this template / Fork** 或 `git clone` 后，在服务器上一条命令装完：
+
+```bash
+cd tg_ehentaiviewer-
+./setup.sh                          # 交互式：输入自己的 bot token → 自动装依赖 → 生成 .env
+```
+
+跑完直接启动：
+
+```bash
+./.venv/bin/python bot.py           # 前台运行
+# 或安装为 systemd 服务（开机自启）：
+./setup.sh --install-service
+```
+
+**全程只需回答几个问题**（bot token、群模式开关、群白名单、owner ID、每日配额），脚本自动：
+1. 创建 Python 虚拟环境并安装全部依赖（`requirements.txt`）
+2. 生成 `.env`（权限 600，含你的专属配置）
+3. 可选：安装 systemd 服务并启动
+
+非交互模式（脚本化部署/容器用）：
+
+```bash
+EHBOT_TELEGRAM_TOKEN="123:abc" \
+EHBOT_GROUP_MODE="1" \
+EHBOT_GROUP_ALLOWED_CHATS="-1001234567890" \
+./setup.sh --non-interactive --install-service
+```
+
+**克隆部署必备提醒：**
+- @BotFather → `/setprivacy` → **Disable**（群模式必须，否则群里收不到链接消息）
+- 群 ID 获取：群里发消息给 @getidsbot / @userinfobot
+- 每个克隆实例的 Telegraph 账号自动独立创建（token 存项目目录 `.telegraph_token.json`）
+
 ## 注意
 
 - 18comic 登录限制画廊需要 `EHBOT_JM_COOKIES`
