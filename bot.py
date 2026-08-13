@@ -33,6 +33,11 @@ ALLOWED_USERS = os.environ.get('EHBOT_ALLOWED_USERS', '')
 OWNER_USERS = os.environ.get('EHBOT_OWNER_USERS') or ALLOWED_USERS or '1601156128'
 # Default is public access with quota for non-owner users. Set EHBOT_PUBLIC_ACCESS=0 to restore whitelist-only mode.
 PUBLIC_ACCESS = os.environ.get('EHBOT_PUBLIC_ACCESS', '1').lower() not in ('0', 'false', 'no')
+# Group mode: EHBOT_GROUP_MODE=1 enables using the bot inside group chats.
+# EHBOT_GROUP_ALLOWED_CHATS (comma separated chat ids, optional): when set,
+# only those groups may use the bot (empty = any group).
+GROUP_MODE = os.environ.get('EHBOT_GROUP_MODE', '0').lower() in ('1', 'true', 'yes', 'on')
+GROUP_ALLOWED_CHATS = {int(x.strip()) for x in os.environ.get('EHBOT_GROUP_ALLOWED_CHATS', '').split(',') if x.strip().lstrip('-').isdigit()}
 DAILY_LIMIT = int(os.environ.get('EHBOT_DAILY_LIMIT', '10'))
 USAGE_FILE = Path(os.environ.get('EHBOT_USAGE_FILE', '/root/eh-reader-bot/usage_limits.json'))
 TZ_UTC8 = timezone(timedelta(hours=8))
@@ -100,12 +105,13 @@ async def handle_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     user_id = query.from_user.id if query.from_user else 0
-    if not is_allowed(user_id):
-        await query.edit_message_text("⚠️ 你没有权限使用此 bot")
+    if not chat_allowed(update):
+        await query.edit_message_text("⚠️ 此 bot 未启用群组模式" if _chat_is_group(update.effective_chat) else "⚠️ 你没有权限使用此 bot")
         return
 
     chat_id = update.effective_chat.id if update.effective_chat else 0
-    if chat_id in _processing:
+    lock = _lock_key(chat_id, user_id)
+    if lock in _processing:
         await query.answer("⏳ 正在处理中，请稍等", show_alert=True)
         return
 
@@ -117,7 +123,7 @@ async def handle_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     loop = asyncio.get_event_loop()
-    _processing.add(chat_id)
+    _processing.add(lock)
     try:
         await query.edit_message_text("🎲 正在随机推荐中...")
 
@@ -126,7 +132,7 @@ async def handle_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rec = await loop.run_in_executor(None, fetch_comic_popular)
         if not rec:
             await query.edit_message_text("❌ 获取推荐失败，请稍后再试")
-            _processing.discard(chat_id)
+            _processing.discard(lock)
             return
 
         url = rec['url']
@@ -182,7 +188,7 @@ async def handle_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.exception(f"Recommend failed: {e}")
         await query.edit_message_text(f"❌ 处理失败：{str(e)[:200]}")
     finally:
-        _processing.discard(chat_id)
+        _processing.discard(lock)
 
 
 def _parse_user_ids(raw: str) -> set[int]:
@@ -209,6 +215,32 @@ def is_allowed(user_id: int) -> bool:
 
 def is_owner(user_id: int) -> bool:
     return user_id in _parse_user_ids(OWNER_USERS)
+
+
+def _chat_is_group(chat) -> bool:
+    return bool(chat) and getattr(chat, 'type', '') in ('group', 'supergroup')
+
+
+def chat_allowed(update) -> bool:
+    """Chat-level access control. Private chats keep the user whitelist logic;
+    group chats require group mode and (optionally) an allowed-chat list."""
+    chat = update.effective_chat
+    if not chat:
+        return False
+    if not _chat_is_group(chat):
+        user_id = update.effective_user.id if update.effective_user else 0
+        return is_allowed(user_id)
+    if not GROUP_MODE:
+        return False
+    if GROUP_ALLOWED_CHATS and chat.id not in GROUP_ALLOWED_CHATS:
+        return False
+    return True
+
+
+def _lock_key(chat_id: int, user_id: int) -> int:
+    """Per-chat lock in DM (sequential per chat), per-user lock in groups so
+    different members never block each other."""
+    return user_id if GROUP_MODE else chat_id
 
 
 def _today_utc8() -> str:
@@ -265,13 +297,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     if is_owner(user_id):
         btns.append([InlineKeyboardButton("🏆 当日排行", callback_data="ranking")])
+    group_hint = (
+        "\n\n📢 <b>群组模式已开启：</b>把我拉进群，直接发链接即可使用，全群成员可用。"
+        if GROUP_MODE else ""
+    )
     await update.message.reply_text(
         "🎴 <b>hentaiviewer</b>\n\n"
         "EH / 18comic 链接转在线阅读器，自动解析图片生成 Telegraph 页面。\n\n"
         "<b>使用方法：</b>\n"
         "直接发送以下链接给我：\n"
         "• <code>e-hentai.org/g/1234567/abc/</code>\n"
-        "• <code>18comic.vip/album/12345/</code>\n\n"
+        "• <code>18comic.vip/album/12345/</code>\n"
+        f"{group_hint}\n\n"
         "更多精彩尽在黄油频道 🧈",
         parse_mode='HTML',
         reply_markup=InlineKeyboardMarkup(btns)
@@ -301,12 +338,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     user_id = update.effective_user.id if update.effective_user else 0
-    if not is_allowed(user_id):
-        await update.message.reply_text("⚠️ 你没有权限使用此 bot")
+    if not chat_allowed(update):
+        msg = "⚠️ 此 bot 未启用群组模式" if _chat_is_group(update.effective_chat) else "⚠️ 你没有权限使用此 bot"
+        await update.message.reply_text(msg)
         return
 
     chat_id = update.effective_chat.id if update.effective_chat else 0
-    if chat_id in _processing:
+    lock = _lock_key(chat_id, user_id)
+    if lock in _processing:
         await update.message.reply_text("⏳ 正在处理中，请等待完成后再发新链接")
         return
 
@@ -339,14 +378,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📦 处理中 ({i+1}/{len(supported)})..." if multi else "🔄 正在处理，请稍候..."
         )
 
-        _processing.add(chat_id)
+        _processing.add(lock)
         try:
             await _process(update, context, url, status)
         except Exception as e:
             logger.exception(f"Failed: {url}")
             await status.edit_text(f"❌ 处理失败：{str(e)[:200]}")
         finally:
-            _processing.discard(chat_id)
+            _processing.discard(lock)
 
 
 async def _process(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str, status_msg):
@@ -741,10 +780,11 @@ async def handle_ranking_pick(update: Update, context: ContextTypes.DEFAULT_TYPE
     chat_id = update.effective_chat.id if update.effective_chat else 0
     user_id = query.from_user.id if query.from_user else 0
 
-    if not is_allowed(user_id):
-        await query.edit_message_text("⚠️ 你没有权限使用此 bot")
+    if not chat_allowed(update):
+        await query.edit_message_text("⚠️ 此 bot 未启用群组模式" if _chat_is_group(update.effective_chat) else "⚠️ 你没有权限使用此 bot")
         return
-    if chat_id in _processing:
+    lock = _lock_key(chat_id, user_id)
+    if lock in _processing:
         await query.answer("⏳ 正在处理中，请稍等", show_alert=True)
         return
 
@@ -770,7 +810,7 @@ async def handle_ranking_pick(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     emoji = "🔞" if is_eh_link(url) else "📖"
     loop = asyncio.get_event_loop()
-    _processing.add(chat_id)
+    _processing.add(lock)
     try:
         await query.edit_message_text(f"🔄 正在处理：{item['title'][:60]}...")
 
@@ -836,7 +876,7 @@ async def handle_ranking_pick(update: Update, context: ContextTypes.DEFAULT_TYPE
         logger.exception(f"Ranking pick failed: {e}")
         await query.edit_message_text(f"❌ 处理失败：{str(e)[:200]}")
     finally:
-        _processing.discard(chat_id)
+        _processing.discard(lock)
 
 
 async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -904,8 +944,8 @@ async def handle_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id if query.from_user else 0
-    if not is_allowed(user_id):
-        await query.edit_message_text("⚠️ 你没有权限使用此 bot")
+    if not chat_allowed(update):
+        await query.edit_message_text("⚠️ 此 bot 未启用群组模式" if _chat_is_group(update.effective_chat) else "⚠️ 你没有权限使用此 bot")
         return
     # Set flag so next text message is treated as search query
     context.user_data['awaiting_search_tags'] = True
@@ -928,12 +968,14 @@ async def handle_search_query(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data['awaiting_search_tags'] = False
 
     user_id = update.effective_user.id if update.effective_user else 0
-    if not is_allowed(user_id):
-        await update.message.reply_text("⚠️ 你没有权限使用此 bot")
+    if not chat_allowed(update):
+        msg = "⚠️ 此 bot 未启用群组模式" if _chat_is_group(update.effective_chat) else "⚠️ 你没有权限使用此 bot"
+        await update.message.reply_text(msg)
         return
 
     chat_id = update.effective_chat.id if update.effective_chat else 0
-    if chat_id in _processing:
+    lock = _lock_key(chat_id, user_id)
+    if lock in _processing:
         await update.message.reply_text("⏳ 正在处理中，请等待完成后再搜索")
         return
 
@@ -969,7 +1011,11 @@ async def handle_search_execute(update: Update, context: ContextTypes.DEFAULT_TY
 
     chat_id = update.effective_chat.id if update.effective_chat else 0
     user_id = query.from_user.id if query.from_user else 0
-    if chat_id in _processing:
+    if not chat_allowed(update):
+        await query.edit_message_text("⚠️ 此 bot 未启用群组模式" if _chat_is_group(update.effective_chat) else "⚠️ 你没有权限使用此 bot")
+        return
+    lock = _lock_key(chat_id, user_id)
+    if lock in _processing:
         await query.answer("⏳ 正在搜索中，请稍等", show_alert=True)
         return
 
@@ -981,7 +1027,7 @@ async def handle_search_execute(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return
 
-    _processing.add(chat_id)
+    _processing.add(lock)
 
     try:
         data = query.data  # "search_eh:tags" or "search_comic:tags"
@@ -1057,7 +1103,7 @@ async def handle_search_execute(update: Update, context: ContextTypes.DEFAULT_TY
         logger.exception(f"Search failed: {e}")
         await query.edit_message_text(f"❌ 搜索失败：{str(e)[:200]}")
     finally:
-        _processing.discard(chat_id)
+        _processing.discard(lock)
 
 
 async def handle_search_results_back(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1126,10 +1172,11 @@ async def handle_search_pick(update: Update, context: ContextTypes.DEFAULT_TYPE)
     chat_id = update.effective_chat.id if update.effective_chat else 0
     user_id = query.from_user.id if query.from_user else 0
 
-    if not is_allowed(user_id):
-        await query.edit_message_text("⚠️ 你没有权限使用此 bot")
+    if not chat_allowed(update):
+        await query.edit_message_text("⚠️ 此 bot 未启用群组模式" if _chat_is_group(update.effective_chat) else "⚠️ 你没有权限使用此 bot")
         return
-    if chat_id in _processing:
+    lock = _lock_key(chat_id, user_id)
+    if lock in _processing:
         await query.answer("⏳ 正在处理中，请稍等", show_alert=True)
         return
 
@@ -1148,7 +1195,7 @@ async def handle_search_pick(update: Update, context: ContextTypes.DEFAULT_TYPE)
     title = item['title']
 
     loop = asyncio.get_event_loop()
-    _processing.add(chat_id)
+    _processing.add(lock)
     try:
         await query.edit_message_text(
             f"🔍 <b>搜索 - {source_name}</b>\n{emoji} {title}\n📝 正在抓取并生成 Telegraph...",
@@ -1214,7 +1261,7 @@ async def handle_search_pick(update: Update, context: ContextTypes.DEFAULT_TYPE)
         logger.exception(f"Search pick failed: {e}")
         await query.edit_message_text(f"❌ 处理失败：{str(e)[:200]}")
     finally:
-        _processing.discard(chat_id)
+        _processing.discard(lock)
 
 
 async def error_handler(update, context):

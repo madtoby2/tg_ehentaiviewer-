@@ -50,6 +50,11 @@ EHBOT_STATIC_IMAGE_ROOT=     # 本地静态目录
 EHBOT_STATIC_IMAGE_BASE_URL= # 静态目录公网 base url
 EHBOT_STATIC_IMAGE_TTL_SECONDS=86400
 
+# 群组模式（可选）
+EHBOT_GROUP_MODE=0           # 1=允许在群里使用（默认 0=仅私聊）
+EHBOT_GROUP_ALLOWED_CHATS=   # 群白名单 chat_id 逗号分隔（空=任意群可用）
+                             # 例如: -1001234567890,-1009876543210
+
 # 排行
 DAILY_RANKING_COMIC_TELEGRAPH=  # 排行发布目标 telegraph 账号 token
 ```
@@ -74,6 +79,26 @@ publishers/
 tests/                        # 单元测试
 trigger_ranking.py            # 手动触发补发当日排行（ops 脚本）
 ```
+
+## 群组模式
+
+把 bot 拉进群，群成员直接发链接即可看图（配额按人独立计算，互不阻塞）。
+
+1. **BotFather 关闭隐私模式**（必须，否则群里收不到普通链接消息）：
+   ```
+   /setprivacy  → 选择 bot  → Disable
+   ```
+2. 配置 `.env` 开启群组模式：
+   ```ini
+   EHBOT_GROUP_MODE=1
+   EHBOT_GROUP_ALLOWED_CHATS=-1001234567890   # 建议填群白名单，防止被拉进陌生群白嫖
+   ```
+3. 重启 bot。群内 `/start` 会显示群组模式说明。
+
+行为差异：
+- 权限：群里所有成员可用（受每日配额限制）；私聊仍走白名单逻辑
+- 并发：群里按**用户**加锁（不同成员同时发链接互不等待），私聊按会话加锁
+- 群白名单为空 = 任何群可用；非空 = 仅限指定群
 
 ## 注意
 
