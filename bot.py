@@ -28,7 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from scrapers.ehentai import scrape_gallery as scrape_eh, is_eh_link, scrape_metadata as scrape_eh_meta, search_eh
 from scrapers.comic18 import scrape_album as scrape_comic, is_comic_link, scrape_metadata as scrape_comic_meta, search_comic
 from scrapers.saucenao import search as saucenao_search
-from scrapers.iqdb import search as iqdb_search
+from scrapers.iqdb import search_hard_timeout as iqdb_search
 from publishers.jm_telegraph import publish_jm_gallery, publish_eh_gallery
 
 logging.basicConfig(

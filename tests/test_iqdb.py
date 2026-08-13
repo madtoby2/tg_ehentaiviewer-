@@ -91,6 +91,12 @@ class IqdbSearchTests(unittest.TestCase):
         with mock.patch("requests.post", side_effect=Exception("timeout")):
             self.assertEqual(iqdb.search("/tmp/x.jpg"), [])
 
+    def test_hard_timeout_terminates_worker_and_returns_empty(self):
+        """IQDB must enforce a wall-clock deadline, not requests' idle timeout."""
+        with mock.patch("scrapers.iqdb.subprocess.run", side_effect=__import__('subprocess').TimeoutExpired('curl', 45)) as run:
+            self.assertEqual(iqdb.search_hard_timeout("/tmp/x.jpg", timeout=45), [])
+        self.assertEqual(run.call_args.kwargs["timeout"], 50)
+
 
 if __name__ == "__main__":
     unittest.main()

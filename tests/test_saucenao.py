@@ -241,6 +241,24 @@ class PhotoHandlerTests(unittest.TestCase):
         search.assert_not_called()
         reply.assert_not_called()
 
+    def test_timeout_cleans_tempdir_and_releases_lock(self):
+        """Timeout/error paths must delete ris_* files and release the user lock."""
+        self._reload(EHBOT_TELEGRAM_TOKEN="x")
+        update = self._photo_update(user_id=777)
+        ctx = self._ctx()
+        with mock.patch("bot.iqdb_search", side_effect=TimeoutError("hard deadline")), \
+             mock.patch.object(bot, "consume_daily_quota", return_value=(True, 9)), \
+             mock.patch.object(Message, "reply_text", new=mock.AsyncMock()) as reply:
+            status_edit = mock.AsyncMock()
+            reply.return_value.edit_text = status_edit
+            asyncio.run(bot.handle_photo(update, ctx))
+        self.assertNotIn(100, bot._processing)
+        self.assertTrue(status_edit.await_count >= 1)
+        self.assertIn("未找到匹配", status_edit.await_args.args[0])
+        import glob
+        leftovers = [p for p in glob.glob("/tmp/ris_*") if os.path.isdir(p)]
+        self.assertEqual(leftovers, [])
+
 def _set_env2(**kw):
     import os
     for k, v in kw.items():

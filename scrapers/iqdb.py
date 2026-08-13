@@ -6,6 +6,7 @@ Saucenao for the EH/18comic use case.
 """
 import logging
 import re
+import subprocess
 
 import requests
 from bs4 import BeautifulSoup
@@ -67,6 +68,41 @@ def parse_results(html: str) -> list[dict]:
     out = list(seen.values())
     out.sort(key=lambda r: r["similarity"], reverse=True)
     return out
+
+
+def search_hard_timeout(image_path: str, timeout: int = 45) -> list[dict]:
+    """IQDB search with a true wall-clock deadline.
+
+    requests' timeout is an *idle socket* timeout; IQDB's queue page can drip
+    bytes forever and never trigger it. curl --max-time enforces total elapsed
+    time, while subprocess.run(timeout=...) is a second kill guarantee. Response
+    stays in memory, so there is no extra response file to clean up.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                "curl", "-sS", "--max-time", str(timeout),
+                "-A", "Mozilla/5.0",
+                "-F", f"file=@{image_path}",
+                IQDB_URL,
+            ],
+            capture_output=True,
+            timeout=timeout + 5,
+            check=False,
+        )
+        if proc.returncode != 0:
+            logger.warning(
+                "IQDB hard-timeout/search failed: rc=%s stderr=%s",
+                proc.returncode, proc.stderr.decode('utf-8', errors='replace')[:120],
+            )
+            return []
+        return parse_results(proc.stdout.decode('utf-8', errors='replace'))
+    except subprocess.TimeoutExpired:
+        logger.warning("IQDB subprocess killed after hard deadline %ss", timeout)
+        return []
+    except Exception as e:
+        logger.warning(f"IQDB hard-timeout search failed: {e}")
+        return []
 
 
 def search(image_path: str) -> list[dict]:
