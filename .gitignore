@@ -1,0 +1,14 @@
+# Secrets
+.env
+
+# Runtime data
+usage_limits.json
+.hermes-tmp.*
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# OS
+.DS_Store
