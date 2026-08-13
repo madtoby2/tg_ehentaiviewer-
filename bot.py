@@ -9,6 +9,7 @@ import sys
 import json
 import asyncio
 import logging
+import tempfile
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -26,6 +27,7 @@ except ImportError:
 sys.path.insert(0, str(Path(__file__).parent))
 from scrapers.ehentai import scrape_gallery as scrape_eh, is_eh_link, scrape_metadata as scrape_eh_meta, search_eh
 from scrapers.comic18 import scrape_album as scrape_comic, is_comic_link, scrape_metadata as scrape_comic_meta, search_comic
+from scrapers.saucenao import search as saucenao_search
 from publishers.jm_telegraph import publish_jm_gallery, publish_eh_gallery
 
 logging.basicConfig(
@@ -47,6 +49,8 @@ PUBLIC_ACCESS = os.environ.get('EHBOT_PUBLIC_ACCESS', '1').lower() not in ('0', 
 GROUP_MODE = os.environ.get('EHBOT_GROUP_MODE', '0').lower() in ('1', 'true', 'yes', 'on')
 GROUP_ALLOWED_CHATS = {int(x.strip()) for x in os.environ.get('EHBOT_GROUP_ALLOWED_CHATS', '').split(',') if x.strip().lstrip('-').isdigit()}
 DAILY_LIMIT = int(os.environ.get('EHBOT_DAILY_LIMIT', '10'))
+# Reverse image search via Saucenao (https://saucenao.com, free API key)
+SAUCENAO_API_KEY = os.environ.get('SAUCENAO_API_KEY', '')
 USAGE_FILE = Path(os.environ.get('EHBOT_USAGE_FILE', '/root/eh-reader-bot/usage_limits.json'))
 TZ_UTC8 = timezone(timedelta(hours=8))
 MAX_PAGES = int(os.environ.get('EHBOT_MAX_PAGES', '0'))
@@ -542,7 +546,145 @@ async def _process(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str,
         f"{source_emoji} <a href=\"{page_url}\">{title}</a>\n"
         f"📄 {published}/{pages} 页"
     )
-    await update.message.reply_text(msg, parse_mode='HTML', disable_web_page_preview=True)
+    # effective_message works for both plain messages and callback triggers
+    await update.effective_message.reply_text(msg, parse_mode='HTML', disable_web_page_preview=True)
+
+
+class _CallbackStatus:
+    """status_msg adapter for callback-triggered _process runs: edits the
+    callback message instead of a sent status message."""
+
+    def __init__(self, query):
+        self._q = query
+
+    async def edit_text(self, text: str, **kw):
+        await self._q.edit_message_text(text, **kw)
+
+    async def delete(self):
+        pass  # keep the message; result is replied below it
+
+
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reverse image search: send a photo → Saucenao matches → optional
+    'generate reader page' button for e-hentai/18comic matches."""
+    if not update.message or not update.message.photo:
+        return
+
+    # Group mode: same trigger rules as links (@mention or reply-to-bot).
+    if _chat_is_group(update.effective_chat) and GROUP_MODE:
+        if not _is_addressed_to_bot(update, context):
+            return
+
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not chat_allowed(update):
+        msg = "⚠️ 此 bot 未启用群组模式" if _chat_is_group(update.effective_chat) else "⚠️ 你没有权限使用此 bot"
+        await update.message.reply_text(msg)
+        return
+
+    chat_id = update.effective_chat.id if update.effective_chat else 0
+    lock = _lock_key(chat_id, user_id)
+    if lock in _processing:
+        await update.message.reply_text("⏳ 正在处理中，请等待完成后再发")
+        return
+
+    if not SAUCENAO_API_KEY:
+        await update.message.reply_text(
+            "🔍 以图搜图未启用——管理员需要在 .env 设置 <code>SAUCENAO_API_KEY</code>"
+            "（saucenao.com 免费注册，每日约 100 次额度）",
+            parse_mode='HTML',
+        )
+        return
+
+    ok, remaining = consume_daily_quota(user_id, 1)
+    if not ok:
+        await update.message.reply_text(
+            f"🚫 今日次数已用完。普通用户每天最多 {DAILY_LIMIT} 次，按 UTC+8 零点重置。"
+        )
+        return
+
+    status = await update.message.reply_text("🔍 正在下载图片...")
+    _processing.add(lock)
+    tmpdir = tempfile.mkdtemp(prefix="ris_")
+    try:
+        photo = update.message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        img_path = Path(tmpdir) / "query.jpg"
+        await file.download_to_drive(custom_path=str(img_path))
+
+        loop = asyncio.get_event_loop()
+        await status.edit_text("🔍 正在搜图匹配中...")
+        results = await loop.run_in_executor(
+            None, saucenao_search, SAUCENAO_API_KEY, str(img_path)
+        )
+
+        if not results:
+            await status.edit_text("❌ 未找到匹配的图片来源")
+            return
+
+        lines = ["🔍 <b>以图搜图结果</b>\n"]
+        for i, r in enumerate(results[:5]):
+            link = r['urls'][0] if r['urls'] else ""
+            title = r['title']
+            lines.append(
+                f"{i+1}. [{r['index_name']} {r['similarity']:.1f}%] {title}"
+            )
+            if link:
+                lines.append(f"   <a href=\"{link}\">🔗 原图链接</a>")
+
+        # If any match carries an EH/18comic URL, offer one-tap reader page
+        eh_url = next(
+            (u for r in results for u in r['urls'] if is_eh_link(u) or is_comic_link(u)),
+            None,
+        )
+        btns = []
+        if eh_url:
+            btns.append([InlineKeyboardButton("📖 生成阅读页", callback_data=f"ris_read:{eh_url}")])
+        await status.edit_text(
+            "\n".join(lines),
+            parse_mode='HTML',
+            disable_web_page_preview=True,
+            reply_markup=InlineKeyboardMarkup(btns) if btns else None,
+        )
+    except Exception as e:
+        logger.exception(f"Reverse image search failed: {e}")
+        await status.edit_text(f"❌ 搜图失败：{str(e)[:200]}")
+    finally:
+        import shutil
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        _processing.discard(lock)
+
+
+async def handle_ris_read(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """'生成阅读页' button on a reverse-search result → run gallery pipeline."""
+    query = update.callback_query
+    await query.answer()
+    url = query.data.split(":", 1)[1]
+
+    user_id = query.from_user.id if query.from_user else 0
+    if not chat_allowed(update):
+        await query.edit_message_text("⚠️ 你没有权限使用此 bot")
+        return
+
+    lock = _lock_key(update.effective_chat.id if update.effective_chat else 0, user_id)
+    if lock in _processing:
+        await query.answer("⏳ 正在处理中，请稍等", show_alert=True)
+        return
+
+    ok, remaining = consume_daily_quota(user_id, 1)
+    if not ok:
+        await query.edit_message_text(
+            f"🚫 今日次数已用完。普通用户每天最多 {DAILY_LIMIT} 次，按 UTC+8 零点重置。"
+        )
+        return
+
+    _processing.add(lock)
+    try:
+        await _process(update, context, url, _CallbackStatus(query))
+    except Exception as e:
+        logger.exception(f"RIS read failed: {url}")
+        await query.edit_message_text(f"❌ 处理失败：{str(e)[:200]}")
+    finally:
+        _processing.discard(lock)
 
 
 async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1570,6 +1712,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_search_results_back, pattern="^search_results_back$"))
     app.add_handler(CallbackQueryHandler(handle_search_pick, pattern="^search_pick_"))
     app.add_handler(CallbackQueryHandler(handle_back_to_start, pattern="^back_to_start$"))
+    app.add_handler(CallbackQueryHandler(handle_ris_read, pattern="^ris_read:"))
     # Fixed reply-keyboard buttons (custom keyboard) — must run before the
     # generic search/message handlers.
     menu_pattern = '^(' + '|'.join(re.escape(k) for k in MENU_ROUTES) + ')$'
@@ -1577,6 +1720,8 @@ def main():
     # Search text handler must come before the general message handler
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'https?://'), handle_search_query), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    # Reverse image search (photos); group trigger rules apply inside handler
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_error_handler(error_handler)
 
     # 每日定时推送排行到 @huangyoustore

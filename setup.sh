@@ -82,6 +82,7 @@ ask "管理员(owner) user_id (免配额)" EHBOT_OWNER_USERS
 ask "普通用户每日配额" EHBOT_DAILY_LIMIT "10"
 ask "私聊白名单 user_id (逗号分隔, 留空=全开放)" EHBOT_ALLOWED_USERS
 ask "Telegraph token 存储路径" EHBOT_TELEGRAPH_TOKEN_FILE ".telegraph_token.json"
+ask "Saucenao API Key (以图搜图, 留空=禁用)" SAUCENAO_API_KEY
 
 # ---------- 3. 生成 .env ----------
 say "==> 生成 .env..."
@@ -93,6 +94,7 @@ EOF
 [ -n "${EHBOT_OWNER_USERS:-}" ] && echo "EHBOT_OWNER_USERS=${EHBOT_OWNER_USERS}" >> .env
 [ -n "${EHBOT_DAILY_LIMIT:-}" ] && echo "EHBOT_DAILY_LIMIT=${EHBOT_DAILY_LIMIT}" >> .env
 [ -n "${EHBOT_ALLOWED_USERS:-}" ] && echo "EHBOT_ALLOWED_USERS=${EHBOT_ALLOWED_USERS}" >> .env
+[ -n "${SAUCENAO_API_KEY:-}" ] && echo "SAUCENAO_API_KEY=${SAUCENAO_API_KEY}" >> .env
 echo "EHBOT_TELEGRAPH_TOKEN_FILE=${EHBOT_TELEGRAPH_TOKEN_FILE:-.telegraph_token.json}" >> .env
 echo "EHBOT_USAGE_FILE=$(pwd)/usage_limits.json" >> .env
 chmod 600 .env
