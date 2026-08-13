@@ -156,13 +156,22 @@ class PhotoHandlerTests(unittest.TestCase):
         ctx.bot.get_file = mock.AsyncMock(return_value=fake_file)
         return ctx
 
-    def test_no_api_key_prompts_config(self):
-        self._reload(EHBOT_TELEGRAM_TOKEN="x")  # SAUCENAO_API_KEY unset
+    def test_no_api_key_uses_free_iqdb_only(self):
+        """No Saucenao key must still work through free/no-key IQDB."""
+        self._reload(EHBOT_TELEGRAM_TOKEN="x")
         update = self._photo_update()
-        with mock.patch.object(Message, "reply_text", new=mock.AsyncMock()) as reply:
-            asyncio.run(bot.handle_photo(update, self._ctx()))
-        reply.assert_awaited_once()
-        self.assertIn("SAUCENAO_API_KEY", reply.await_args.args[0])
+        ctx = self._ctx()
+        iq = [{"similarity": 88.0, "title": "IQ only", "urls": ["https://danbooru.donmai.us/posts/1"]}]
+        with mock.patch("bot.iqdb_search", return_value=iq) as iq_search, \
+             mock.patch("bot.saucenao_search") as sn_search, \
+             mock.patch.object(bot, "consume_daily_quota", return_value=(True, 9)), \
+             mock.patch.object(Message, "reply_text", new=mock.AsyncMock()) as reply:
+            status_edit = mock.AsyncMock()
+            reply.return_value.edit_text = status_edit
+            asyncio.run(bot.handle_photo(update, ctx))
+        iq_search.assert_called_once()
+        sn_search.assert_not_called()
+        self.assertIn("IQ only", status_edit.await_args.args[0])
 
     def test_search_result_shows_matches_and_reader_button(self):
         import tests.test_saucenao as ts
@@ -176,6 +185,7 @@ class PhotoHandlerTests(unittest.TestCase):
         }]
         ctx = self._ctx()
         with mock.patch("bot.saucenao_search", return_value=results) as search, \
+             mock.patch("bot.iqdb_search", return_value=[]), \
              mock.patch.object(bot, "consume_daily_quota", return_value=(True, 9)), \
              mock.patch.object(Message, "reply_text", new=mock.AsyncMock()) as reply:
             status_edit = mock.AsyncMock()
@@ -188,6 +198,39 @@ class PhotoHandlerTests(unittest.TestCase):
         last_text = status_edit.await_args.args[0] if status_edit.await_args.args else ""
         self.assertIn("Sample Gallery", last_text)
         self.assertIn("ris_read:", str(status_edit.await_args.kwargs.get("reply_markup")))
+
+    def test_aggregates_iqdb_and_saucenao_sorted(self):
+        """Both engines run; results merged and sorted by similarity."""
+        self._reload(EHBOT_TELEGRAM_TOKEN="x", SAUCENAO_API_KEY="KEY")
+        update = self._photo_update()
+        sn = [{"similarity": 50.0, "title": "SN", "index_name": "Pixiv", "urls": ["https://pixiv.net/1"]}]
+        iq = [
+            {"similarity": 99.0, "title": "IQ", "urls": ["https://e-hentai.org/g/9/abc/"]},
+            {"similarity": 80.0, "title": "IQ2", "urls": ["https://danbooru.donmai.us/posts/2"]},
+        ]
+        ctx = self._ctx()
+        with mock.patch("bot.saucenao_search", return_value=sn), \
+             mock.patch("bot.iqdb_search", return_value=iq), \
+             mock.patch.object(bot, "consume_daily_quota", return_value=(True, 9)), \
+             mock.patch.object(Message, "reply_text", new=mock.AsyncMock()) as reply:
+            status_edit = mock.AsyncMock()
+            reply.return_value.edit_text = status_edit
+            asyncio.run(bot.handle_photo(update, ctx))
+        last_text = status_edit.await_args.args[0]
+        # sorted by similarity: 99.0% → 80.0% → 50.0%
+        self.assertLess(last_text.index("99.0%"), last_text.index("80.0%"))
+        self.assertLess(last_text.index("80.0%"), last_text.index("50.0%"))
+        self.assertIn("IQDB", last_text)
+        # reader button offered because IQDB found an EH link
+        self.assertIn("ris_read:", str(status_edit.await_args.kwargs.get("reply_markup")))
+
+    def test_multi_key_round_robin(self):
+        """Comma-separated keys rotate across searches."""
+        self._reload(EHBOT_TELEGRAM_TOKEN="x", SAUCENAO_API_KEY="K1,K2,K3")
+        self.assertEqual(len(bot.SAUCENAO_API_KEYS), 3)
+        got = [bot._next_saucenao_key(), bot._next_saucenao_key(), bot._next_saucenao_key(),
+               bot._next_saucenao_key()]
+        self.assertEqual(got, ["K1", "K2", "K3", "K1"])
 
     def test_group_photo_without_mention_silent(self):
         self._reload(EHBOT_GROUP_MODE="1", EHBOT_TELEGRAM_TOKEN="x", SAUCENAO_API_KEY="KEY")

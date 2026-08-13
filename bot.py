@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from scrapers.ehentai import scrape_gallery as scrape_eh, is_eh_link, scrape_metadata as scrape_eh_meta, search_eh
 from scrapers.comic18 import scrape_album as scrape_comic, is_comic_link, scrape_metadata as scrape_comic_meta, search_comic
 from scrapers.saucenao import search as saucenao_search
+from scrapers.iqdb import search as iqdb_search
 from publishers.jm_telegraph import publish_jm_gallery, publish_eh_gallery
 
 logging.basicConfig(
@@ -49,8 +50,20 @@ PUBLIC_ACCESS = os.environ.get('EHBOT_PUBLIC_ACCESS', '1').lower() not in ('0', 
 GROUP_MODE = os.environ.get('EHBOT_GROUP_MODE', '0').lower() in ('1', 'true', 'yes', 'on')
 GROUP_ALLOWED_CHATS = {int(x.strip()) for x in os.environ.get('EHBOT_GROUP_ALLOWED_CHATS', '').split(',') if x.strip().lstrip('-').isdigit()}
 DAILY_LIMIT = int(os.environ.get('EHBOT_DAILY_LIMIT', '10'))
-# Reverse image search via Saucenao (https://saucenao.com, free API key)
-SAUCENAO_API_KEY = os.environ.get('SAUCENAO_API_KEY', '')
+# Reverse image search via Saucenao (https://saucenao.com, free API key).
+# Comma-separated keys are rotated round-robin (N keys = 100N searches/day).
+SAUCENAO_API_KEYS = [k.strip() for k in os.environ.get('SAUCENAO_API_KEY', '').split(',') if k.strip()]
+_sn_key_index = 0
+
+
+def _next_saucenao_key() -> str | None:
+    """Round-robin over configured Saucenao API keys."""
+    global _sn_key_index
+    if not SAUCENAO_API_KEYS:
+        return None
+    key = SAUCENAO_API_KEYS[_sn_key_index % len(SAUCENAO_API_KEYS)]
+    _sn_key_index += 1
+    return key
 USAGE_FILE = Path(os.environ.get('EHBOT_USAGE_FILE', '/root/eh-reader-bot/usage_limits.json'))
 TZ_UTC8 = timezone(timedelta(hours=8))
 MAX_PAGES = int(os.environ.get('EHBOT_MAX_PAGES', '0'))
@@ -587,13 +600,8 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⏳ 正在处理中，请等待完成后再发")
         return
 
-    if not SAUCENAO_API_KEY:
-        await update.message.reply_text(
-            "🔍 以图搜图未启用——管理员需要在 .env 设置 <code>SAUCENAO_API_KEY</code>"
-            "（saucenao.com 免费注册，每日约 100 次额度）",
-            parse_mode='HTML',
-        )
-        return
+    # IQDB is free/no-key and always available. Saucenao is added when one
+    # or more keys are configured.
 
     ok, remaining = consume_daily_quota(user_id, 1)
     if not ok:
@@ -613,9 +621,22 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         loop = asyncio.get_event_loop()
         await status.edit_text("🔍 正在搜图匹配中...")
-        results = await loop.run_in_executor(
-            None, saucenao_search, SAUCENAO_API_KEY, str(img_path)
-        )
+
+        # Aggregate engines in parallel: IQDB is free/no-key; Saucenao is
+        # optional and rotates comma-separated keys round-robin.
+        tasks = [loop.run_in_executor(None, iqdb_search, str(img_path))]
+        sn_key = _next_saucenao_key()
+        if sn_key:
+            tasks.append(loop.run_in_executor(None, saucenao_search, sn_key, str(img_path)))
+        done = await asyncio.gather(*tasks, return_exceptions=True)
+        results = []
+        for r in done:
+            if isinstance(r, list):
+                results.extend(r)
+        for r in results:
+            r.setdefault('index_name', 'IQDB')
+        results.sort(key=lambda r: r['similarity'], reverse=True)
+        results = results[:5]
 
         if not results:
             await status.edit_text("❌ 未找到匹配的图片来源")
