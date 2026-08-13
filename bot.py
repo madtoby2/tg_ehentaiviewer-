@@ -12,7 +12,7 @@ import logging
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # Load .env (cloned deployments: ./setup.sh generates it). Existing env vars
@@ -109,23 +109,22 @@ def _has_korean_tags(tags: list[str]) -> bool:
 
 async def handle_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Random recommend: fetch 1 item → scrape → publish → show inline link."""
-    query = update.callback_query
-    await query.answer()
+    menu = _Menu(update)
+    await menu.answer()
 
-    user_id = query.from_user.id if query.from_user else 0
+    user_id = menu.user.id if menu.user else 0
     if not chat_allowed(update):
-        await query.edit_message_text("⚠️ 此 bot 未启用群组模式" if _chat_is_group(update.effective_chat) else "⚠️ 你没有权限使用此 bot")
+        await menu.say("⚠️ 此 bot 未启用群组模式" if _chat_is_group(update.effective_chat) else "⚠️ 你没有权限使用此 bot")
         return
 
-    chat_id = update.effective_chat.id if update.effective_chat else 0
-    lock = _lock_key(chat_id, user_id)
+    lock = _lock_key(menu.chat_id, user_id)
     if lock in _processing:
-        await query.answer("⏳ 正在处理中，请稍等", show_alert=True)
+        await menu.answer("⏳ 正在处理中，请稍等", show_alert=True)
         return
 
     ok, remaining = consume_daily_quota(user_id, 1)
     if not ok:
-        await query.edit_message_text(
+        await menu.say(
             f"🚫 今日次数已用完。普通用户每天最多 {DAILY_LIMIT} 次，按 UTC+8 零点重置。"
         )
         return
@@ -133,13 +132,13 @@ async def handle_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
     loop = asyncio.get_event_loop()
     _processing.add(lock)
     try:
-        await query.edit_message_text("🎲 正在随机推荐中...")
+        await menu.say("🎲 正在随机推荐中...")
 
         rec = await loop.run_in_executor(None, fetch_eh_popular)
         if not rec:
             rec = await loop.run_in_executor(None, fetch_comic_popular)
         if not rec:
-            await query.edit_message_text("❌ 获取推荐失败，请稍后再试")
+            await menu.say("❌ 获取推荐失败，请稍后再试")
             _processing.discard(lock)
             return
 
@@ -149,7 +148,7 @@ async def handle_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
         source_emoji = "🔞" if rec['source'] == 'eh' else "📖"
         total_pages = rec.get('total_pages', 0)
 
-        await query.edit_message_text(
+        await menu.say(
             f"🎲 <b>{source_name}</b>\n{source_emoji} {title}\n📄 {total_pages} 页\n📝 正在生成 Telegraph...",
             parse_mode='HTML'
         )
@@ -164,7 +163,7 @@ async def handle_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
         if result.get('error'):
-            await query.edit_message_text(f"❌ {result['error']}")
+            await menu.say(f"❌ {result['error']}")
             return
 
         image_details = result.get('image_details', [])
@@ -190,11 +189,11 @@ async def handle_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
         btn = InlineKeyboardMarkup([[InlineKeyboardButton("🎲 再推荐一个", callback_data="recommend")]])
-        await query.edit_message_text(msg, parse_mode='HTML', disable_web_page_preview=True, reply_markup=btn)
+        await menu.say(msg, parse_mode='HTML', disable_web_page_preview=True, reply_markup=btn)
 
     except Exception as e:
         logger.exception(f"Recommend failed: {e}")
-        await query.edit_message_text(f"❌ 处理失败：{str(e)[:200]}")
+        await menu.say(f"❌ 处理失败：{str(e)[:200]}")
     finally:
         _processing.discard(lock)
 
@@ -251,6 +250,33 @@ def _lock_key(chat_id: int, user_id: int) -> int:
     return user_id if GROUP_MODE else chat_id
 
 
+class _Menu:
+    """UI adapter: entry handlers work both as inline buttons (callback_query)
+    and as fixed reply-keyboard buttons (plain text message).
+
+    - callback trigger: answer() no-ops, say() edits the original message
+    - text trigger:     answer() no-ops, say() replies with a new message
+    """
+
+    def __init__(self, update: Update):
+        q = update.callback_query
+        self.is_callback = q is not None
+        self.user = q.from_user if q else update.effective_user
+        self.chat_id = update.effective_chat.id if update.effective_chat else 0
+        self._q = q
+        self._msg = update.message
+        self._update = update
+
+    async def answer(self, text: str | None = None, show_alert: bool = False):
+        if self.is_callback:
+            await self._q.answer(text, show_alert=show_alert)
+
+    async def say(self, text: str, **kw):
+        if self.is_callback:
+            return await self._q.edit_message_text(text, **kw)
+        return await self._msg.reply_text(text, **kw)
+
+
 def _today_utc8() -> str:
     return datetime.now(TZ_UTC8).strftime('%Y-%m-%d')
 
@@ -297,14 +323,17 @@ def consume_daily_quota(user_id: int, amount: int = 1) -> tuple[bool, int]:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id if update.effective_user else 0
-    btns = [
-        [InlineKeyboardButton("🎮 黄油下载", url="https://t.me/huangyoustore")],
-        [InlineKeyboardButton("🎲 随机推荐", callback_data="recommend")],
-        [InlineKeyboardButton("🔍 标签搜索", callback_data="search_start")],
-        [InlineKeyboardButton("💬 联系bot主", url="https://t.me/madtobybot")],
+
+    # Fixed reply keyboard (custom keyboard) — buttons send plain text,
+    # routed by handle_menu_button.
+    rows = [
+        [KeyboardButton("🎲 随机推荐"), KeyboardButton("🔍 标签搜索")],
+        [KeyboardButton("📊 今日额度")],
     ]
     if is_owner(user_id):
-        btns.append([InlineKeyboardButton("🏆 当日排行", callback_data="ranking")])
+        rows.append([KeyboardButton("🏆 当日排行")])
+    keyboard = ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
     group_hint = (
         "\n\n📢 <b>群组模式已开启：</b>把我拉进群，直接发链接即可使用，全群成员可用。"
         if GROUP_MODE else ""
@@ -316,10 +345,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "直接发送以下链接给我：\n"
         "• <code>e-hentai.org/g/1234567/abc/</code>\n"
         "• <code>18comic.vip/album/12345/</code>\n"
+        "或点击下方固定按钮 🎲🔍\n"
         f"{group_hint}\n\n"
-        "更多精彩尽在黄油频道 🧈",
+        "更多精彩尽在黄油频道 🧈 @huangyoustore",
         parse_mode='HTML',
-        reply_markup=InlineKeyboardMarkup(btns)
+        reply_markup=keyboard
     )
 
 
@@ -339,6 +369,29 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🧈 <b>黄油频道</b> @huangyoustore",
         parse_mode='HTML'
     )
+
+
+# Fixed reply-keyboard (custom keyboard) button labels → handler routing.
+# The buttons send plain text; we match exact labels here.
+# Values are function NAMES resolved at call time (avoids definition-order
+# issues at module load).
+MENU_ROUTES = {
+    "🎲 随机推荐": "handle_recommend",
+    "🔍 标签搜索": "handle_search_start",
+    "🏆 当日排行": "handle_ranking",
+    "📊 今日额度": "daily_command",
+}
+
+
+async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Route fixed reply-keyboard button presses to their handlers."""
+    if not update.message or not update.message.text:
+        return
+    handler_name = MENU_ROUTES.get(update.message.text.strip())
+    if handler_name:
+        handler = globals().get(handler_name)
+        if handler:
+            await handler(update, context)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -681,22 +734,22 @@ def fetch_comic_ranking() -> list[dict]:
 
 async def handle_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ranking entry point: show source picker. Owner only."""
-    query = update.callback_query
-    user_id = query.from_user.id if query.from_user else 0
+    menu = _Menu(update)
+    user_id = menu.user.id if menu.user else 0
     owner_set = _parse_user_ids(OWNER_USERS)
 
     if user_id not in owner_set:
-        await query.answer("仅限管理员使用", show_alert=True)
+        await menu.answer("仅限管理员使用", show_alert=True)
         return
 
-    await query.answer()
+    await menu.answer()
 
     keyboard = InlineKeyboardMarkup([
         [InlineKeyboardButton("🔞 EH 排行", callback_data="ranking_eh"),
          InlineKeyboardButton("📖 18comic 排行", callback_data="ranking_comic")],
         [InlineKeyboardButton("🔙 返回", callback_data="back_to_start")],
     ])
-    await query.edit_message_text(
+    await menu.say(
         "🏆 <b>当日排行</b>\n\n选择一个来源查看热门排行：",
         parse_mode='HTML', reply_markup=keyboard
     )
@@ -949,15 +1002,15 @@ async def handle_back_to_start(update: Update, _context: ContextTypes.DEFAULT_TY
 
 async def handle_search_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Search button clicked → ask user to enter tags."""
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id if query.from_user else 0
+    menu = _Menu(update)
+    await menu.answer()
+    user_id = menu.user.id if menu.user else 0
     if not chat_allowed(update):
-        await query.edit_message_text("⚠️ 此 bot 未启用群组模式" if _chat_is_group(update.effective_chat) else "⚠️ 你没有权限使用此 bot")
+        await menu.say("⚠️ 此 bot 未启用群组模式" if _chat_is_group(update.effective_chat) else "⚠️ 你没有权限使用此 bot")
         return
     # Set flag so next text message is treated as search query
     context.user_data['awaiting_search_tags'] = True
-    await query.edit_message_text(
+    await menu.say(
         "🔍 <b>标签搜索</b>\n\n"
         "请输入要搜索的标签，多个标签用空格隔开：\n"
         "例如：<code>female:sole male</code>\n\n"
@@ -1487,6 +1540,10 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_search_results_back, pattern="^search_results_back$"))
     app.add_handler(CallbackQueryHandler(handle_search_pick, pattern="^search_pick_"))
     app.add_handler(CallbackQueryHandler(handle_back_to_start, pattern="^back_to_start$"))
+    # Fixed reply-keyboard buttons (custom keyboard) — must run before the
+    # generic search/message handlers.
+    menu_pattern = '^(' + '|'.join(re.escape(k) for k in MENU_ROUTES) + ')$'
+    app.add_handler(MessageHandler(filters.Regex(menu_pattern), handle_menu_button), group=2)
     # Search text handler must come before the general message handler
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & ~filters.Regex(r'https?://'), handle_search_query), group=1)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

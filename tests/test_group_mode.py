@@ -248,3 +248,68 @@ class HandleMessageGroupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CustomKeyboardTests(unittest.TestCase):
+    """Reply-keyboard (custom keyboard) routing and dual-mode _Menu adapter."""
+
+    def setUp(self):
+        self._saved = dict(os.environ)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._saved)
+        importlib.reload(bot)
+
+    def _reload(self, **env):
+        _set_env(**env)
+        return importlib.reload(bot)
+
+    def test_menu_routes_map_to_existing_handlers(self):
+        self._reload(EHBOT_TELEGRAM_TOKEN="x")
+        for label, fn_name in bot.MENU_ROUTES.items():
+            self.assertTrue(callable(getattr(bot, fn_name, None)), f"{label} → {fn_name}")
+
+    def test_menu_button_text_route_dispatch(self):
+        """Pressing a fixed keyboard button sends its label as text;
+        handle_menu_button must call the mapped handler."""
+        self._reload(EHBOT_GROUP_MODE="1", EHBOT_TELEGRAM_TOKEN="x")
+        update = _make_update(-100123, "supergroup", 999, "🎲 随机推荐")
+        ctx = mock.Mock()
+        with mock.patch.object(bot, "handle_recommend", new=mock.AsyncMock()) as rec, \
+             mock.patch.object(Message, "reply_text", new=mock.AsyncMock()):
+            asyncio.run(bot.handle_menu_button(update, ctx))
+        rec.assert_awaited_once_with(update, ctx)
+
+    def test_non_menu_text_not_dispatched(self):
+        """Normal text (links, chat) must not be eaten by the menu router."""
+        self._reload(EHBOT_TELEGRAM_TOKEN="x")
+        update = _make_update(100, "private", 999, "随便聊聊")
+        ctx = mock.Mock()
+        with mock.patch.object(bot, "handle_recommend", new=mock.AsyncMock()) as rec:
+            asyncio.run(bot.handle_menu_button(update, ctx))
+        rec.assert_not_called()
+
+    def test_menu_dual_mode_text_trigger_replies(self):
+        """Text trigger: _Menu.say() must reply (not edit a callback message)."""
+        self._reload(EHBOT_GROUP_MODE="1", EHBOT_TELEGRAM_TOKEN="x")
+        update = _make_update(-100123, "supergroup", 999, "🎲 随机推荐")
+        menu = bot._Menu(update)
+        self.assertFalse(menu.is_callback)
+        with mock.patch.object(Message, "reply_text", new=mock.AsyncMock()) as reply:
+            asyncio.run(menu.say("hello"))
+        reply.assert_awaited_once_with("hello")
+
+    def test_menu_dual_mode_callback_trigger_edits(self):
+        """Callback trigger: _Menu.say() must edit the original message."""
+        self._reload(EHBOT_TELEGRAM_TOKEN="x")
+        msg = _make_update(100, "private", 999, "x").message
+        query = mock.Mock()
+        query.from_user = mock.Mock(id=999)
+        query.answer = mock.AsyncMock()
+        query.edit_message_text = mock.AsyncMock()
+        update = Update(update_id=2, callback_query=query, message=msg)
+        menu = bot._Menu(update)
+        self.assertTrue(menu.is_callback)
+        asyncio.run(menu.say("edited", parse_mode="HTML"))
+        query.edit_message_text.assert_awaited_once_with("edited", parse_mode="HTML")
