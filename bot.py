@@ -394,9 +394,39 @@ async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await handler(update, context)
 
 
+def _is_addressed_to_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Group-mode trigger: only respond when the message @mentions the bot or
+    replies to one of the bot's own messages."""
+    msg = update.message
+    if not msg:
+        return False
+    # Reply to one of our own messages
+    reply = msg.reply_to_message
+    bot_id = getattr(context.bot, "id", None)
+    if reply and reply.from_user and bot_id and reply.from_user.id == bot_id:
+        return True
+    # @mention of the bot
+    username = getattr(context.bot, "username", None)
+    for ent in (msg.entities or []):
+        if ent.type == "text_mention":
+            if bot_id and ent.user and ent.user.id == bot_id:
+                return True
+        elif ent.type == "mention" and username:
+            raw = msg.text[ent.offset:ent.offset + ent.length].lstrip("@")
+            if raw.lower() == username.lower():
+                return True
+    return False
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
+
+    # Group mode: only respond to @mention or reply-to-bot messages.
+    # Private chat behavior stays as-is.
+    if _chat_is_group(update.effective_chat) and GROUP_MODE:
+        if not _is_addressed_to_bot(update, context):
+            return
 
     user_id = update.effective_user.id if update.effective_user else 0
     if not chat_allowed(update):

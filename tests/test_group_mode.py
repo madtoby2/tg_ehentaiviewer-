@@ -16,7 +16,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import bot
-from telegram import Bot, Chat, Message, Update, User
+from telegram import Bot, Chat, Message, MessageEntity, Update, User
 
 
 def _set_env(**kw):
@@ -27,7 +27,7 @@ def _set_env(**kw):
             os.environ[k] = v
 
 
-def _make_update(chat_id, chat_type, user_id, text):
+def _make_update(chat_id, chat_type, user_id, text, entities=None):
     bot_obj = Bot(token="123456:test-token")
     chat = Chat(id=chat_id, type=chat_type)
     user = User(id=user_id, is_bot=False, first_name="tester")
@@ -37,6 +37,7 @@ def _make_update(chat_id, chat_type, user_id, text):
         chat=chat,
         from_user=user,
         text=text,
+        entities=entities,
     )
     msg.set_bot(bot_obj)
     return Update(update_id=1, message=msg)
@@ -195,6 +196,8 @@ class HandleMessageGroupTests(unittest.TestCase):
 
     async def _run(self, update):
         ctx = mock.Mock()
+        ctx.bot.username = "bot"
+        ctx.bot.id = 12345
         await bot.handle_message(update, ctx)
 
     def test_group_denied_when_group_mode_off_replies_notice(self):
@@ -207,8 +210,10 @@ class HandleMessageGroupTests(unittest.TestCase):
         reply.assert_called_once_with("⚠️ 此 bot 未启用群组模式")
 
     def test_group_allowed_when_group_mode_on_processes(self):
+        """Group mode on + @mention + link → processed."""
         self._reload(EHBOT_GROUP_MODE="1", EHBOT_TELEGRAM_TOKEN="x")
-        update = _make_update(-100123, "supergroup", 999, self.URL)
+        ent = MessageEntity(type="mention", offset=0, length=4)
+        update = _make_update(-100123, "supergroup", 999, "@bot " + self.URL, entities=[ent])
         with mock.patch.object(bot, "_process", new=mock.AsyncMock()) as process, \
              mock.patch.object(bot, "consume_daily_quota", return_value=(True, 9)), \
              mock.patch.object(Message, "reply_text", new=mock.AsyncMock()):
@@ -217,6 +222,19 @@ class HandleMessageGroupTests(unittest.TestCase):
         self.assertEqual(process.await_args.args[2], self.URL)
 
     def test_group_not_in_whitelist_denied(self):
+        """Whitelist miss + @mention + link → denied with notice."""
+        self._reload(EHBOT_GROUP_MODE="1", EHBOT_GROUP_ALLOWED_CHATS="-100456",
+                     EHBOT_TELEGRAM_TOKEN="x")
+        ent = MessageEntity(type="mention", offset=0, length=4)
+        update = _make_update(-100123, "supergroup", 999, "@bot " + self.URL, entities=[ent])
+        with mock.patch.object(bot, "_process", new=mock.AsyncMock()) as process, \
+             mock.patch.object(Message, "reply_text", new=mock.AsyncMock()) as reply:
+            asyncio.run(self._run(update))
+        process.assert_not_called()
+        reply.assert_called_once_with("⚠️ 此 bot 未启用群组模式")
+
+    def test_group_not_in_whitelist_unaddressed_stays_silent(self):
+        """Whitelist miss + plain link (no @mention) → silent, no notice."""
         self._reload(EHBOT_GROUP_MODE="1", EHBOT_GROUP_ALLOWED_CHATS="-100456",
                      EHBOT_TELEGRAM_TOKEN="x")
         update = _make_update(-100123, "supergroup", 999, self.URL)
@@ -224,7 +242,7 @@ class HandleMessageGroupTests(unittest.TestCase):
              mock.patch.object(Message, "reply_text", new=mock.AsyncMock()) as reply:
             asyncio.run(self._run(update))
         process.assert_not_called()
-        reply.assert_called_once_with("⚠️ 此 bot 未启用群组模式")
+        reply.assert_not_called()
 
     def test_private_chat_denied_when_whitelist_misses(self):
         self._reload(EHBOT_PUBLIC_ACCESS="0", EHBOT_ALLOWED_USERS="111",
@@ -313,3 +331,119 @@ class CustomKeyboardTests(unittest.TestCase):
         self.assertTrue(menu.is_callback)
         asyncio.run(menu.say("edited", parse_mode="HTML"))
         query.edit_message_text.assert_awaited_once_with("edited", parse_mode="HTML")
+
+
+class GroupTriggerTests(unittest.TestCase):
+    """Group mode: only respond to messages that @mention the bot or reply
+    to a bot message. Private chat behavior unchanged."""
+
+    URL = "https://e-hentai.org/g/1234567/abc/"
+    BOT_USERNAME = "hentaiviewer_bot"
+    BOT_ID = 8406100638
+
+    def setUp(self):
+        self._saved = dict(os.environ)
+
+    def tearDown(self):
+        os.environ.clear()
+        os.environ.update(self._saved)
+        importlib.reload(bot)
+
+    def _reload(self, **env):
+        _set_env(**env)
+        return importlib.reload(bot)
+
+    def _ctx(self):
+        ctx = mock.Mock()
+        ctx.bot.id = self.BOT_ID
+        ctx.bot.username = self.BOT_USERNAME
+        return ctx
+
+    def _group_update(self, text, entities=None, reply_to_bot=False):
+        bot_obj = Bot(token="123456:test-token")
+        chat = Chat(id=-100123, type="supergroup")
+        user = User(id=999, is_bot=False, first_name="tester")
+        reply_to = None
+        if reply_to_bot:
+            reply_to = Message(
+                message_id=2, date=datetime.now(timezone.utc), chat=chat,
+                from_user=User(id=self.BOT_ID, is_bot=True, first_name="bot"),
+                text="old")
+            reply_to.set_bot(bot_obj)
+        msg = Message(
+            message_id=1, date=datetime.now(timezone.utc), chat=chat,
+            from_user=user, text=text, entities=entities, reply_to_message=reply_to)
+        msg.set_bot(bot_obj)
+        return Update(update_id=1, message=msg)
+
+    def test_plain_link_in_group_not_processed(self):
+        """No @mention, no reply → bot must stay silent in group mode."""
+        self._reload(EHBOT_GROUP_MODE="1", EHBOT_TELEGRAM_TOKEN="x")
+        update = self._group_update(self.URL)
+        with mock.patch.object(bot, "_process", new=mock.AsyncMock()) as process, \
+             mock.patch.object(Message, "reply_text", new=mock.AsyncMock()) as reply:
+            asyncio.run(bot.handle_message(update, self._ctx()))
+        process.assert_not_called()
+        reply.assert_not_called()
+
+    def test_mention_link_in_group_processed(self):
+        self._reload(EHBOT_GROUP_MODE="1", EHBOT_TELEGRAM_TOKEN="x")
+        ent = MessageEntity(type="mention", offset=0, length=len("@" + self.BOT_USERNAME))
+        update = self._group_update("@" + self.BOT_USERNAME + " " + self.URL, entities=[ent])
+        with mock.patch.object(bot, "_process", new=mock.AsyncMock()) as process, \
+             mock.patch.object(bot, "consume_daily_quota", return_value=(True, 9)), \
+             mock.patch.object(Message, "reply_text", new=mock.AsyncMock()):
+            asyncio.run(bot.handle_message(update, self._ctx()))
+        process.assert_awaited_once()
+        self.assertEqual(process.await_args.args[2], self.URL)
+
+    def test_reply_to_bot_link_in_group_processed(self):
+        self._reload(EHBOT_GROUP_MODE="1", EHBOT_TELEGRAM_TOKEN="x")
+        update = self._group_update(self.URL, reply_to_bot=True)
+        with mock.patch.object(bot, "_process", new=mock.AsyncMock()) as process, \
+             mock.patch.object(bot, "consume_daily_quota", return_value=(True, 9)), \
+             mock.patch.object(Message, "reply_text", new=mock.AsyncMock()):
+            asyncio.run(bot.handle_message(update, self._ctx()))
+        process.assert_awaited_once()
+        self.assertEqual(process.await_args.args[2], self.URL)
+
+    def test_mention_without_link_ignored(self):
+        self._reload(EHBOT_GROUP_MODE="1", EHBOT_TELEGRAM_TOKEN="x")
+        ent = MessageEntity(type="mention", offset=0, length=len("@" + self.BOT_USERNAME))
+        update = self._group_update("@" + self.BOT_USERNAME + " 随便聊聊", entities=[ent])
+        with mock.patch.object(bot, "_process", new=mock.AsyncMock()) as process, \
+             mock.patch.object(Message, "reply_text", new=mock.AsyncMock()) as reply:
+            asyncio.run(bot.handle_message(update, self._ctx()))
+        process.assert_not_called()
+        reply.assert_not_called()
+
+    def test_private_link_still_processed_without_mention(self):
+        """DM behavior must not change: plain links always processed."""
+        self._reload(EHBOT_GROUP_MODE="1", EHBOT_TELEGRAM_TOKEN="x")
+        update = _make_update(100, "private", 999, self.URL)
+        with mock.patch.object(bot, "_process", new=mock.AsyncMock()) as process, \
+             mock.patch.object(bot, "consume_daily_quota", return_value=(True, 9)), \
+             mock.patch.object(Message, "reply_text", new=mock.AsyncMock()):
+            asyncio.run(bot.handle_message(update, self._ctx()))
+        process.assert_awaited_once()
+
+    def test_reply_to_other_user_in_group_not_processed(self):
+        """Replying to another member (not the bot) must not trigger."""
+        self._reload(EHBOT_GROUP_MODE="1", EHBOT_TELEGRAM_TOKEN="x")
+        bot_obj = Bot(token="123456:test-token")
+        chat = Chat(id=-100123, type="supergroup")
+        reply_to = Message(
+            message_id=2, date=datetime.now(timezone.utc), chat=chat,
+            from_user=User(id=777, is_bot=False, first_name="other"),
+            text="hi")
+        reply_to.set_bot(bot_obj)
+        msg = Message(
+            message_id=1, date=datetime.now(timezone.utc), chat=chat,
+            from_user=User(id=999, is_bot=False, first_name="tester"),
+            text=self.URL, reply_to_message=reply_to)
+        msg.set_bot(bot_obj)
+        update = Update(update_id=1, message=msg)
+        with mock.patch.object(bot, "_process", new=mock.AsyncMock()) as process, \
+             mock.patch.object(Message, "reply_text", new=mock.AsyncMock()):
+            asyncio.run(bot.handle_message(update, self._ctx()))
+        process.assert_not_called()
