@@ -27,11 +27,14 @@ Telegram bot — 发链接直接看图：支持 **EHentai** 与 **18comic**（�
 - `📊 今日额度` — 查看剩余次数
 - `🏆 当日排行` — 热门排行（仅管理员可见）
 
-**以图搜图：** 直接发图片给 bot（私聊直接发；群里需 @bot 或回复 bot），并行聚合：
-- **IQDB**：无 key 免费启用，覆盖 E-Hentai / Danbooru / 图站；高负载时可能排队
+**任意图片查出处：** 直接发图片给 bot（私聊直接发；群里需 @bot 或回复 bot），并行聚合：
+- **Yandex Images**：通用相似图和网页来源，适合真人、AV 截图、商品、表情包等
+- **trace.moe**：动画截图识别，返回动画名、集数、时间点和预览
+- **本地 OCR**：提取番号（如 `SSIS-123`）、水印、字幕等文字线索
+- **IQDB**：无 key 免费启用，覆盖 E-Hentai / Danbooru / 图站；45 秒硬截止
 - **Saucenao**：可选增强，覆盖 Pixiv / Twitter / E-Hentai 等。多个 API key 用逗号分隔，自动轮询（N 个 key ≈ 100N 次/天）
 
-匹配到 EH/18comic 画廊可直接点「📖 生成阅读页」。配置示例：`SAUCENAO_API_KEY=key1,key2,key3`。
+只有匹配到 EH/18comic 画廊时才显示「📖 生成阅读页」。配置示例：`SAUCENAO_API_KEY=key1,key2,key3`。
 
 直接发链接或文字消息（URL / tag 搜索词）即可触发处理流程。
 

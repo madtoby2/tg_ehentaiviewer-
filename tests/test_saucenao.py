@@ -232,6 +232,28 @@ class PhotoHandlerTests(unittest.TestCase):
                bot._next_saucenao_key()]
         self.assertEqual(got, ["K1", "K2", "K3", "K1"])
 
+    def test_general_image_results_include_yandex_anime_and_av_code(self):
+        """Any screenshot gets a Yandex result page; anime and AV clues are shown when detected."""
+        self._reload(EHBOT_TELEGRAM_TOKEN="x")
+        update = self._photo_update()
+        ctx = self._ctx()
+        anime = [{"title": "动画名", "episode": 2, "at": "03:21", "similarity": 91.2,
+                  "preview": "https://api.trace.moe/video/x", "image": "", "anilist_id": 1}]
+        yandex = {"search_url": "https://yandex.com/images/search?rpt=imageview&cbir_id=x"}
+        with mock.patch("bot.iqdb_search", return_value=[]), \
+             mock.patch("bot.trace_moe_search", return_value=anime), \
+             mock.patch("bot.yandex_image_search", return_value=yandex), \
+             mock.patch("bot.screenshot_ocr", return_value="SSIS-123 watermark"), \
+             mock.patch.object(bot, "consume_daily_quota", return_value=(True, 9)), \
+             mock.patch.object(Message, "reply_text", new=mock.AsyncMock()) as reply:
+            status_edit = mock.AsyncMock(); reply.return_value.edit_text = status_edit
+            asyncio.run(bot.handle_photo(update, ctx))
+        text = status_edit.await_args.args[0]
+        self.assertIn("动画名", text)
+        self.assertIn("SSIS-123", text)
+        self.assertIn("Yandex", text)
+        self.assertNotIn("生成阅读页", text)
+
     def test_group_photo_without_mention_silent(self):
         self._reload(EHBOT_GROUP_MODE="1", EHBOT_TELEGRAM_TOKEN="x", SAUCENAO_API_KEY="KEY")
         update = self._photo_update(chat_id=-100123, chat_type="supergroup")

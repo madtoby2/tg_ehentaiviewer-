@@ -29,6 +29,9 @@ from scrapers.ehentai import scrape_gallery as scrape_eh, is_eh_link, scrape_met
 from scrapers.comic18 import scrape_album as scrape_comic, is_comic_link, scrape_metadata as scrape_comic_meta, search_comic
 from scrapers.saucenao import search as saucenao_search
 from scrapers.iqdb import search_hard_timeout as iqdb_search
+from scrapers.trace_moe import search as trace_moe_search
+from scrapers.yandex_images import search as yandex_image_search
+from scrapers.screenshot_ocr import ocr as screenshot_ocr, extract_av_codes
 from publishers.jm_telegraph import publish_jm_gallery, publish_eh_gallery
 
 logging.basicConfig(
@@ -362,8 +365,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "直接发送以下链接给我：\n"
         "• <code>e-hentai.org/g/1234567/abc/</code>\n"
         "• <code>18comic.vip/album/12345/</code>\n\n"
-        "<b>🔍 以图搜图</b>\n"
-        "直接发送图片，即可查找出处；匹配到 EH / 18comic 后可点击「📖 生成阅读页」。\n\n"
+        "<b>🔍 任意图片查出处</b>\n"
+        "直接发送漫画、插画、动画截图、AV 截图、真人或商品图片：\n"
+        "• 通用相似图与网页来源\n"
+        "• 动画名称、集数和时间点\n"
+        "• OCR 提取截图中的番号、水印和文字\n"
+        "匹配到 EH / 18comic 后，还可点击「📖 生成阅读页」。\n\n"
         "也可以点击下方固定按钮：随机推荐、标签搜索、今日额度。"
         f"{group_hint}\n\n"
         "更多精彩尽在黄油频道 🧈 @huangyoustore",
@@ -624,39 +631,63 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         loop = asyncio.get_event_loop()
         await status.edit_text("🔍 正在搜图匹配中...")
 
-        # Aggregate engines in parallel: IQDB is free/no-key; Saucenao is
-        # optional and rotates comma-separated keys round-robin.
-        tasks = [loop.run_in_executor(None, iqdb_search, str(img_path))]
+        # Run general and specialist engines in parallel. IQDB gets its own
+        # hard process deadline; every local file is still owned by tmpdir and
+        # removed by the outer finally block.
+        tasks = [
+            loop.run_in_executor(None, iqdb_search, str(img_path)),
+            loop.run_in_executor(None, trace_moe_search, str(img_path)),
+            loop.run_in_executor(None, yandex_image_search, str(img_path)),
+            loop.run_in_executor(None, screenshot_ocr, str(img_path)),
+        ]
         sn_key = _next_saucenao_key()
         if sn_key:
             tasks.append(loop.run_in_executor(None, saucenao_search, sn_key, str(img_path)))
         done = await asyncio.gather(*tasks, return_exceptions=True)
-        results = []
-        for r in done:
-            if isinstance(r, list):
-                results.extend(r)
-        for r in results:
-            r.setdefault('index_name', 'IQDB')
-        results.sort(key=lambda r: r['similarity'], reverse=True)
-        results = results[:5]
 
-        if not results:
+        iq_results = done[0] if isinstance(done[0], list) else []
+        anime_results = done[1] if isinstance(done[1], list) else []
+        yandex_result = done[2] if isinstance(done[2], dict) else None
+        ocr_text = done[3] if isinstance(done[3], str) else ""
+        source_results = list(iq_results)
+        if sn_key and len(done) > 4 and isinstance(done[4], list):
+            source_results.extend(done[4])
+        for r in source_results:
+            r.setdefault('index_name', 'IQDB')
+        source_results.sort(key=lambda r: r['similarity'], reverse=True)
+        source_results = source_results[:5]
+        av_codes = extract_av_codes(ocr_text)
+
+        if not source_results and not anime_results and not yandex_result and not av_codes:
             await status.edit_text("❌ 未找到匹配的图片来源")
             return
 
-        lines = ["🔍 <b>以图搜图结果</b>\n"]
-        for i, r in enumerate(results[:5]):
+        lines = ["🔍 <b>图片出处搜索结果</b>\n"]
+        if av_codes:
+            lines.append("🎬 <b>OCR 识别到番号：</b> " + "、".join(f"<code>{c}</code>" for c in av_codes[:5]))
+
+        if anime_results:
+            a = anime_results[0]
+            episode = f" 第 {a['episode']} 集" if a.get('episode') is not None else ""
+            preview = f" · <a href=\"{a['preview']}\">预览</a>" if a.get('preview') else ""
+            lines.append(
+                f"📺 <b>动画：</b>{a['title']}{episode} {a['at']} "
+                f"({a['similarity']:.1f}%){preview}"
+            )
+
+        for i, r in enumerate(source_results):
             link = r['urls'][0] if r['urls'] else ""
             title = r['title']
-            lines.append(
-                f"{i+1}. [{r['index_name']} {r['similarity']:.1f}%] {title}"
-            )
+            lines.append(f"{i+1}. [{r['index_name']} {r['similarity']:.1f}%] {title}")
             if link:
                 lines.append(f"   <a href=\"{link}\">🔗 原图链接</a>")
 
-        # If any match carries an EH/18comic URL, offer one-tap reader page
+        if yandex_result:
+            lines.append(f"🌐 <a href=\"{yandex_result['search_url']}\">打开 Yandex 通用搜图结果</a>")
+
+        # Only gallery matches get the reader-page action.
         eh_url = next(
-            (u for r in results for u in r['urls'] if is_eh_link(u) or is_comic_link(u)),
+            (u for r in source_results for u in r['urls'] if is_eh_link(u) or is_comic_link(u)),
             None,
         )
         btns = []

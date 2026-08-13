@@ -290,8 +290,9 @@ class CustomKeyboardTests(unittest.TestCase):
         with mock.patch.object(Message, "reply_text", new=mock.AsyncMock()) as reply:
             asyncio.run(bot.start(update, mock.Mock()))
         text = reply.await_args.args[0]
-        self.assertIn("以图搜图", text)
-        self.assertIn("直接发送图片", text)
+        self.assertIn("任意图片查出处", text)
+        self.assertIn("AV 截图", text)
+        self.assertIn("直接发送漫画", text)
         self.assertIn("生成阅读页", text)
 
     def test_menu_routes_map_to_existing_handlers(self):
