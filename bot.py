@@ -683,7 +683,15 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 lines.append(f"   <a href=\"{link}\">🔗 原图链接</a>")
 
         if yandex_result:
-            lines.append(f"🌐 <a href=\"{yandex_result['search_url']}\">打开 Yandex 通用搜图结果</a>")
+            sites = yandex_result.get('sites') or []
+            if sites:
+                lines.append("🌐 <b>网页来源：</b>")
+                for site in sites[:5]:
+                    lines.append(
+                        f"• <a href=\"{site['url']}\">{site['title']}</a>"
+                        f" · {site.get('domain', '')}"
+                    )
+            lines.append(f"🔎 <a href=\"{yandex_result['search_url']}\">查看更多 Yandex 相似结果</a>")
 
         # Only gallery matches get the reader-page action.
         eh_url = next(

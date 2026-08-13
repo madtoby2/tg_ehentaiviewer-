@@ -239,7 +239,11 @@ class PhotoHandlerTests(unittest.TestCase):
         ctx = self._ctx()
         anime = [{"title": "动画名", "episode": 2, "at": "03:21", "similarity": 91.2,
                   "preview": "https://api.trace.moe/video/x", "image": "", "anilist_id": 1}]
-        yandex = {"search_url": "https://yandex.com/images/search?rpt=imageview&cbir_id=x"}
+        yandex = {
+            "search_url": "https://yandex.com/images/search?rpt=imageview&cbir_id=x",
+            "sites": [{"title": "识别出的来源标题", "domain": "source.example",
+                       "url": "https://source.example/work", "image_url": ""}],
+        }
         with mock.patch("bot.iqdb_search", return_value=[]), \
              mock.patch("bot.trace_moe_search", return_value=anime), \
              mock.patch("bot.yandex_image_search", return_value=yandex), \
@@ -252,6 +256,8 @@ class PhotoHandlerTests(unittest.TestCase):
         self.assertIn("动画名", text)
         self.assertIn("SSIS-123", text)
         self.assertIn("Yandex", text)
+        self.assertIn("识别出的来源标题", text)
+        self.assertIn("source.example", text)
         self.assertNotIn("生成阅读页", text)
 
     def test_group_photo_without_mention_silent(self):
