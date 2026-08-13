@@ -283,6 +283,17 @@ class CustomKeyboardTests(unittest.TestCase):
         _set_env(**env)
         return importlib.reload(bot)
 
+    def test_start_intro_mentions_reverse_image_search(self):
+        """The /start welcome text must introduce photo reverse-search usage."""
+        self._reload(EHBOT_TELEGRAM_TOKEN="x")
+        update = _make_update(100, "private", 999, "/start")
+        with mock.patch.object(Message, "reply_text", new=mock.AsyncMock()) as reply:
+            asyncio.run(bot.start(update, mock.Mock()))
+        text = reply.await_args.args[0]
+        self.assertIn("以图搜图", text)
+        self.assertIn("直接发送图片", text)
+        self.assertIn("生成阅读页", text)
+
     def test_menu_routes_map_to_existing_handlers(self):
         self._reload(EHBOT_TELEGRAM_TOKEN="x")
         for label, fn_name in bot.MENU_ROUTES.items():

@@ -352,17 +352,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
     group_hint = (
-        "\n\n📢 <b>群组模式已开启：</b>把我拉进群，直接发链接即可使用，全群成员可用。"
+        "\n\n📢 <b>群组模式已开启：</b>把我拉进群后，<b>@我并发送链接/图片</b>，或<b>回复我的消息</b>发送链接/图片。"
         if GROUP_MODE else ""
     )
     await update.message.reply_text(
         "🎴 <b>hentaiviewer</b>\n\n"
         "EH / 18comic 链接转在线阅读器，自动解析图片生成 Telegraph 页面。\n\n"
-        "<b>使用方法：</b>\n"
+        "<b>📖 链接生成阅读页</b>\n"
         "直接发送以下链接给我：\n"
         "• <code>e-hentai.org/g/1234567/abc/</code>\n"
-        "• <code>18comic.vip/album/12345/</code>\n"
-        "或点击下方固定按钮 🎲🔍\n"
+        "• <code>18comic.vip/album/12345/</code>\n\n"
+        "<b>🔍 以图搜图</b>\n"
+        "直接发送图片，即可查找出处；匹配到 EH / 18comic 后可点击「📖 生成阅读页」。\n\n"
+        "也可以点击下方固定按钮：随机推荐、标签搜索、今日额度。"
         f"{group_hint}\n\n"
         "更多精彩尽在黄油频道 🧈 @huangyoustore",
         parse_mode='HTML',
