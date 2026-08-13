@@ -154,6 +154,7 @@ class PhotoHandlerTests(unittest.TestCase):
         fake_file = mock.Mock()
         fake_file.download_to_drive = mock.AsyncMock()
         ctx.bot.get_file = mock.AsyncMock(return_value=fake_file)
+        ctx.bot.send_media_group = mock.AsyncMock()
         return ctx
 
     def test_no_api_key_uses_free_iqdb_only(self):
@@ -259,6 +260,38 @@ class PhotoHandlerTests(unittest.TestCase):
         self.assertIn("识别出的来源标题", text)
         self.assertIn("source.example", text)
         self.assertNotIn("生成阅读页", text)
+
+    def test_yandex_previews_are_sent_as_album(self):
+        self._reload(EHBOT_TELEGRAM_TOKEN="x")
+        update = self._photo_update()
+        ctx = self._ctx()
+        sites = [
+            {'title': f'Match {i}', 'domain': 'src.test', 'url': f'https://src.test/{i}',
+             'image_url': f'https://img.test/{i}.jpg'} for i in range(2)
+        ]
+        yandex = {'search_url': 'https://yandex.test/results', 'sites': sites}
+        def fake_download(_sites, directory, limit=4):
+            Path(directory).mkdir(parents=True, exist_ok=True)
+            out=[]
+            for i, site in enumerate(_sites):
+                p=Path(directory)/f'match_{i}.jpg'; p.write_bytes(b'jpeg')
+                out.append({**site, 'path': str(p)})
+            return out
+        with mock.patch('bot.iqdb_search', return_value=[]), \
+             mock.patch('bot.trace_moe_search', return_value=[]), \
+             mock.patch('bot.yandex_image_search', return_value=yandex), \
+             mock.patch('bot.screenshot_ocr', return_value=''), \
+             mock.patch('bot.yandex_download_previews', side_effect=fake_download), \
+             mock.patch.object(bot, 'consume_daily_quota', return_value=(True, 9)), \
+             mock.patch.object(Message, 'reply_text', new=mock.AsyncMock()) as reply:
+            reply.return_value.edit_text = mock.AsyncMock()
+            asyncio.run(bot.handle_photo(update, ctx))
+        ctx.bot.send_media_group.assert_awaited_once()
+        media = ctx.bot.send_media_group.await_args.kwargs['media']
+        self.assertEqual(len(media), 2)
+        self.assertIn('Match 0', media[0].caption)
+        # Files are closed and the outer finally removes the entire task dir.
+        self.assertEqual([p for p in Path('/tmp').glob('ris_*') if p.is_dir()], [])
 
     def test_group_photo_without_mention_silent(self):
         self._reload(EHBOT_GROUP_MODE="1", EHBOT_TELEGRAM_TOKEN="x", SAUCENAO_API_KEY="KEY")

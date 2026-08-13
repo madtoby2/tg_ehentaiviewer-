@@ -40,6 +40,19 @@ class YandexImagesTests(unittest.TestCase):
     def test_invalid_response_returns_none(self):
         self.assertIsNone(yandex_images.parse_upload({}))
 
+    def test_download_previews_rejects_non_image_and_caps_count(self):
+        sites = [
+            {'image_url': f'https://img.test/{i}.jpg', 'title': f'T{i}', 'domain': 'img.test', 'url': 'https://src.test'}
+            for i in range(6)
+        ]
+        good = mock.Mock(headers={'content-type': 'image/jpeg'}, content=b'jpeg'); good.raise_for_status=mock.Mock()
+        bad = mock.Mock(headers={'content-type': 'text/html'}, content=b'html'); bad.raise_for_status=mock.Mock()
+        with tempfile.TemporaryDirectory() as d, mock.patch('requests.get', side_effect=[good, bad, good, good, good]) as get:
+            paths = yandex_images.download_previews(sites, d, limit=4)
+            self.assertEqual(len(paths), 3)
+            self.assertTrue(all(Path(x['path']).exists() for x in paths))
+            self.assertEqual(get.call_count, 4)
+
     def test_upload_posts_image(self):
         with tempfile.NamedTemporaryFile(suffix='.jpg') as f:
             f.write(b'x'); f.flush()

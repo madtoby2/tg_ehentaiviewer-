@@ -7,13 +7,14 @@ import os
 import re
 import sys
 import json
+import html
 import asyncio
 import logging
 import tempfile
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 
 # Load .env (cloned deployments: ./setup.sh generates it). Existing env vars
@@ -30,7 +31,7 @@ from scrapers.comic18 import scrape_album as scrape_comic, is_comic_link, scrape
 from scrapers.saucenao import search as saucenao_search
 from scrapers.iqdb import search_hard_timeout as iqdb_search
 from scrapers.trace_moe import search as trace_moe_search
-from scrapers.yandex_images import search as yandex_image_search
+from scrapers.yandex_images import search as yandex_image_search, download_previews as yandex_download_previews
 from scrapers.screenshot_ocr import ocr as screenshot_ocr, extract_av_codes
 from publishers.jm_telegraph import publish_jm_gallery, publish_eh_gallery
 
@@ -707,6 +708,32 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             disable_web_page_preview=True,
             reply_markup=InlineKeyboardMarkup(btns) if btns else None,
         )
+
+        # Send up to four directly matched images so the user can compare
+        # visually. Files live under this task's tmpdir and are deleted in the
+        # outer finally after Telegram finishes reading them.
+        if yandex_result and yandex_result.get('sites'):
+            previews = await loop.run_in_executor(
+                None, yandex_download_previews,
+                yandex_result['sites'], str(Path(tmpdir) / 'matches'), 4,
+            )
+            if previews:
+                media = []
+                handles = []
+                try:
+                    for i, item in enumerate(previews, 1):
+                        fh = open(item['path'], 'rb')
+                        handles.append(fh)
+                        caption = (
+                            f"候选 {i}：{html.escape(item['title'])}\n"
+                            f"来源：{html.escape(item.get('domain', ''))}\n"
+                            f"{html.escape(item['url'])}"
+                        )
+                        media.append(InputMediaPhoto(media=fh, caption=caption, parse_mode='HTML'))
+                    await context.bot.send_media_group(chat_id=chat_id, media=media)
+                finally:
+                    for fh in handles:
+                        fh.close()
     except Exception as e:
         logger.exception(f"Reverse image search failed: {e}")
         await status.edit_text(f"❌ 搜图失败：{str(e)[:200]}")

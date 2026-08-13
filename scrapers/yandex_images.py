@@ -1,5 +1,6 @@
 """Yandex Images general reverse-search uploader."""
 import logging
+from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit, parse_qsl, urlencode
 import requests
 from bs4 import BeautifulSoup
@@ -59,6 +60,32 @@ def parse_upload(data: dict) -> dict | None:
         "original_image_url": original,
         "search_url": f"https://yandex.com/images/search?rpt=imageview&cbir_id={quote(cbir_id, safe='')}",
     }
+
+
+def download_previews(sites: list[dict], directory: str, limit: int = 4, max_bytes: int = 8 * 1024 * 1024) -> list[dict]:
+    """Download bounded image previews so Telegram users can compare visually."""
+    dest = Path(directory)
+    dest.mkdir(parents=True, exist_ok=True)
+    out = []
+    for index, site in enumerate(sites[:limit], 1):
+        url = site.get('image_url', '')
+        if url.startswith('//'):
+            url = 'https:' + url
+        if not url.startswith(('http://', 'https://')):
+            continue
+        try:
+            resp = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+            resp.raise_for_status()
+            content_type = resp.headers.get('content-type', '').split(';')[0].lower()
+            if not content_type.startswith('image/') or len(resp.content) > max_bytes:
+                continue
+            suffix = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}.get(content_type, ".jpg")
+            path = dest / f"match_{index}{suffix}"
+            path.write_bytes(resp.content)
+            out.append({**site, 'path': str(path)})
+        except Exception as e:
+            logger.info("Yandex preview download skipped: %s", e)
+    return out
 
 
 def search(image_path: str) -> dict | None:
