@@ -234,7 +234,10 @@ def _upload_image_host(path: Path, session: requests.Session | None = None) -> s
     if IMAGE_HOST == 'litterbox':
         return _upload_to_litterbox(path, session=session)
 
-    uploaded = _upload_to_catbox(path, session=session)
+    # A non-URL Catbox response (including HTTP 200 with an empty body) is a
+    # service-level rejection. Retrying the same upload immediately amplifies
+    # rate limiting during ranking batches, so fail over to Litterbox at once.
+    uploaded = _upload_to_catbox(path, retries=1, session=session)
     if uploaded:
         return uploaded
 

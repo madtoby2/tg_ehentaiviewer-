@@ -33,6 +33,7 @@ from scrapers.iqdb import search_hard_timeout as iqdb_search
 from scrapers.trace_moe import search as trace_moe_search
 from scrapers.yandex_images import search as yandex_image_search, download_previews as yandex_download_previews
 from scrapers.screenshot_ocr import ocr as screenshot_ocr, extract_av_codes
+from scrapers.whos_tv import search as whos_tv_search
 from publishers.jm_telegraph import publish_jm_gallery, publish_eh_gallery
 
 logging.basicConfig(
@@ -57,6 +58,8 @@ DAILY_LIMIT = int(os.environ.get('EHBOT_DAILY_LIMIT', '10'))
 # Reverse image search via Saucenao (https://saucenao.com, free API key).
 # Comma-separated keys are rotated round-robin (N keys = 100N searches/day).
 SAUCENAO_API_KEYS = [k.strip() for k in os.environ.get('SAUCENAO_API_KEY', '').split(',') if k.strip()]
+WHOS_TV_USERNAME = os.environ.get('WHOS_TV_USERNAME', '').strip()
+WHOS_TV_PASSWORD = os.environ.get('WHOS_TV_PASSWORD', '')
 _sn_key_index = 0
 
 
@@ -369,6 +372,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>🔍 任意图片查出处</b>\n"
         "直接发送漫画、插画、动画截图、AV 截图、真人或商品图片：\n"
         "• 通用相似图与网页来源\n"
+        "• Whos.tv AV 番号、相似度与精准时间点\n"
         "• 动画名称、集数和时间点\n"
         "• OCR 提取截图中的番号、水印和文字\n"
         "匹配到 EH / 18comic 后，还可点击「📖 生成阅读页」。\n\n"
@@ -641,8 +645,16 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             loop.run_in_executor(None, yandex_image_search, str(img_path)),
             loop.run_in_executor(None, screenshot_ocr, str(img_path)),
         ]
+        whos_index = None
+        if WHOS_TV_USERNAME and WHOS_TV_PASSWORD:
+            whos_index = len(tasks)
+            tasks.append(loop.run_in_executor(
+                None, whos_tv_search, WHOS_TV_USERNAME, WHOS_TV_PASSWORD, str(img_path)
+            ))
         sn_key = _next_saucenao_key()
+        sn_index = None
         if sn_key:
+            sn_index = len(tasks)
             tasks.append(loop.run_in_executor(None, saucenao_search, sn_key, str(img_path)))
         done = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -650,20 +662,32 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         anime_results = done[1] if isinstance(done[1], list) else []
         yandex_result = done[2] if isinstance(done[2], dict) else None
         ocr_text = done[3] if isinstance(done[3], str) else ""
+        whos_result = done[whos_index] if whos_index is not None and isinstance(done[whos_index], dict) else None
         source_results = list(iq_results)
-        if sn_key and len(done) > 4 and isinstance(done[4], list):
-            source_results.extend(done[4])
+        if sn_index is not None and isinstance(done[sn_index], list):
+            source_results.extend(done[sn_index])
         for r in source_results:
             r.setdefault('index_name', 'IQDB')
         source_results.sort(key=lambda r: r['similarity'], reverse=True)
         source_results = source_results[:5]
         av_codes = extract_av_codes(ocr_text)
 
-        if not source_results and not anime_results and not yandex_result and not av_codes:
+        if not source_results and not anime_results and not yandex_result and not av_codes and not (whos_result and whos_result.get('matches')):
             await status.edit_text("❌ 未找到匹配的图片来源")
             return
 
         lines = ["🔍 <b>图片出处搜索结果</b>\n"]
+        if whos_result and whos_result.get('matches'):
+            lines.append("🎯 <b>Whos.tv AV 画面匹配：</b>")
+            for match in whos_result['matches'][:3]:
+                at = f" · <code>{html.escape(match['at'])}</code>" if match.get('at') else ""
+                lines.append(
+                    f"• <a href=\"{html.escape(match['url'])}\"><code>{html.escape(match['code'])}</code></a>"
+                    f" · {match['similarity']:.1f}%{at}"
+                )
+            if whos_result.get('result_url'):
+                lines.append(f"🔎 <a href=\"{html.escape(whos_result['result_url'])}\">查看 Whos.tv 完整结果</a>")
+
         if av_codes:
             lines.append("🎬 <b>OCR 识别到番号：</b> " + "、".join(f"<code>{c}</code>" for c in av_codes[:5]))
 
@@ -1699,6 +1723,23 @@ def _build_ranking_text(title: str, items: list[dict], emoji: str, source: str) 
     return "\n".join(lines)
 
 
+async def _run_ranking_generators(items, generator, concurrency: int = 1):
+    """Generate ranking pages with bounded gallery-level concurrency.
+
+    Results preserve input order and exceptions stay isolated to their item.
+    """
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+
+    async def run_one(item):
+        async with semaphore:
+            try:
+                return await generator(item)
+            except Exception as exc:
+                return exc
+
+    return await asyncio.gather(*(run_one(item) for item in items))
+
+
 async def send_daily_ranking_to_store(context: ContextTypes.DEFAULT_TYPE):
     """每日定时：获取排行→生成 Telegraph→推送到商店频道"""
     logger.info("[每日排行] 开始获取...")
@@ -1740,9 +1781,14 @@ async def send_daily_ranking_to_store(context: ContextTypes.DEFAULT_TYPE):
             return
 
         if generate_telegraph:
-            # 并行生成所有条目的 Telegraph
-            tasks = [_gen_tg(item, is_eh) for item in items[:DAILY_RANKING_TOP_N]]
-            tg_results = await asyncio.gather(*tasks, return_exceptions=True)
+            # JM publishing is upload-heavy. Bound gallery-level concurrency so
+            # five galleries do not multiply into ~20 simultaneous Catbox posts.
+            concurrency = 2 if is_eh else 1
+            tg_results = await _run_ranking_generators(
+                items[:DAILY_RANKING_TOP_N],
+                lambda item: _gen_tg(item, is_eh),
+                concurrency=concurrency,
+            )
         else:
             logger.warning(f"[每日排行] {source_name} Telegraph 已禁用，使用原站链接快速发送")
             tg_results = [None] * min(len(items), DAILY_RANKING_TOP_N)

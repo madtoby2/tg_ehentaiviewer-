@@ -132,6 +132,10 @@ class PhotoHandlerTests(unittest.TestCase):
         importlib.reload(bot)
 
     def _reload(self, **env):
+        # Keep optional live engines disabled unless a test explicitly enables
+        # them; bot.py loads local .env during import.
+        env.setdefault("WHOS_TV_USERNAME", "")
+        env.setdefault("WHOS_TV_PASSWORD", "")
         _set_env2(**env)
         return importlib.reload(bot)
 
@@ -233,6 +237,33 @@ class PhotoHandlerTests(unittest.TestCase):
         got = [bot._next_saucenao_key(), bot._next_saucenao_key(), bot._next_saucenao_key(),
                bot._next_saucenao_key()]
         self.assertEqual(got, ["K1", "K2", "K3", "K1"])
+
+    def test_whos_tv_av_match_is_shown_before_generic_engines(self):
+        self._reload(EHBOT_TELEGRAM_TOKEN="x", WHOS_TV_USERNAME="user", WHOS_TV_PASSWORD="secret")
+        update = self._photo_update()
+        ctx = self._ctx()
+        whos = {
+            "result_url": "https://whos.tv/search-img/task?g=1",
+            "matches": [{"code": "GANA-2823", "similarity": 100.0,
+                         "at": "01:00:40", "url": "https://whos.tv/videos/gana-2823",
+                         "preview": "https://img.test/frame.webp"}],
+        }
+        with mock.patch("bot.whos_tv_search", return_value=whos) as search, \
+             mock.patch("bot.iqdb_search", return_value=[]), \
+             mock.patch("bot.trace_moe_search", return_value=[]), \
+             mock.patch("bot.yandex_image_search", return_value=None), \
+             mock.patch("bot.screenshot_ocr", return_value=""), \
+             mock.patch.object(bot, "consume_daily_quota", return_value=(True, 9)), \
+             mock.patch.object(Message, "reply_text", new=mock.AsyncMock()) as reply:
+            reply.return_value.edit_text = mock.AsyncMock()
+            asyncio.run(bot.handle_photo(update, ctx))
+        search.assert_called_once()
+        text = reply.return_value.edit_text.await_args.args[0]
+        self.assertIn("Whos.tv", text)
+        self.assertIn("GANA-2823", text)
+        self.assertIn("100.0%", text)
+        self.assertIn("01:00:40", text)
+        self.assertIn("https://whos.tv/videos/gana-2823", text)
 
     def test_general_image_results_include_yandex_anime_and_av_code(self):
         """Any screenshot gets a Yandex result page; anime and AV clues are shown when detected."""

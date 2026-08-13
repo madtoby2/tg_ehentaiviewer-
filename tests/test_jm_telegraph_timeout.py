@@ -69,6 +69,23 @@ class CollectCompletedResultsTests(unittest.TestCase):
         release.assert_called_once_with()
         session.close.assert_called_once_with()
 
+    def test_catbox_empty_response_falls_back_without_repeating_catbox(self):
+        import tempfile
+        import publishers.jm_telegraph as publisher
+
+        with tempfile.TemporaryDirectory() as tmp:
+            image = Path(tmp) / 'p0001.jpg'
+            image.write_bytes(b'x' * 1001)
+            with mock.patch.object(publisher, '_post_file', side_effect=[None, 'https://litter.test/p.jpg']) as post, \
+                 mock.patch.object(publisher.time, 'sleep') as sleep:
+                result = publisher._upload_image_host(image, session=mock.Mock())
+
+        self.assertEqual(result, 'https://litter.test/p.jpg')
+        self.assertEqual(post.call_count, 2)
+        self.assertEqual(post.call_args_list[0].args[3], 'Catbox')
+        self.assertEqual(post.call_args_list[1].args[3], 'Litterbox')
+        sleep.assert_not_called()
+
     def test_decode_worker_closes_response_and_pillow_images(self):
         import tempfile
         import publishers.jm_telegraph as publisher
