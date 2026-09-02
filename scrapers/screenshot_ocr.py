@@ -2,6 +2,10 @@
 import logging
 import re
 import subprocess
+import tempfile
+from pathlib import Path
+
+from PIL import Image, ImageEnhance
 
 logger = logging.getLogger(__name__)
 # Common AV identifiers: SSIS-123, IPX456, ABP-001 etc.
@@ -16,17 +20,31 @@ def _normalize_prefix(prefix: str) -> str:
 
 def ocr(image_path: str) -> str:
     try:
+        lower_text = ""
+        with tempfile.TemporaryDirectory(prefix="ocr_") as tmp:
+            with Image.open(image_path) as image:
+                width, height = image.size
+                lower = image.crop((0, int(height * .58), width, height)).convert("L")
+                lower = lower.resize((width * 2, lower.height * 2), Image.Resampling.LANCZOS)
+                lower = ImageEnhance.Contrast(lower).enhance(2.0)
+                lower_path = Path(tmp) / "lower.png"
+                lower.save(lower_path)
+            fast = subprocess.run(
+                ["tesseract", str(lower_path), "stdout", "-l", "eng", "--psm", "11"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            lower_text = fast.stdout.strip() if fast.returncode == 0 else ""
+            if extract_av_codes(lower_text):
+                return lower_text
         done = subprocess.run(
             ["tesseract", image_path, "stdout", "-l", "eng+chi_sim", "--psm", "11"],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            check=False,
+            capture_output=True, text=True, timeout=10, check=False,
         )
-        return done.stdout.strip() if done.returncode == 0 else ""
+        full_text = done.stdout.strip() if done.returncode == 0 else ""
+        return "\n".join(part for part in (lower_text, full_text) if part)
     except subprocess.TimeoutExpired:
-        logger.warning("OCR killed after 20s")
-        return ""
+        logger.warning("OCR stage killed after 10s")
+        return lower_text if 'lower_text' in locals() else ""
     except Exception as e:
         logger.warning("OCR failed: %s", e)
         return ""

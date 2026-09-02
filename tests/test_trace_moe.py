@@ -41,6 +41,13 @@ class TraceMoeTests(unittest.TestCase):
                   "anilist": {"id": 2, "title": {"native": "另一部动画"}}}
         self.assertEqual(trace_moe.parse_results({"result": [first, second]}), [])
 
+    def test_ambiguous_match_rejected_when_first_two_are_same_anime(self):
+        top = {**SAMPLE["result"][0], "similarity": .965, "anilist": {"id": 21, "title": {"native": "ONE PIECE"}}}
+        same = {**top, "similarity": .964}
+        different = {**SAMPLE["result"][0], "similarity": .957,
+                     "anilist": {"id": 2002, "title": {"native": "別のアニメ"}}}
+        self.assertEqual(trace_moe.parse_results({"result": [top, same, different]}), [])
+
     def test_low_similarity_filtered(self):
         d = {"result": [{**SAMPLE["result"][0], "similarity": .2}]}
         self.assertEqual(trace_moe.parse_results(d), [])

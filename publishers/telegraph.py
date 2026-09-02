@@ -152,6 +152,23 @@ def build_page_content(telegraph_urls: list[str]) -> list:
     return content
 
 
+def _truncate_title(title: str, max_bytes: int = 120) -> str:
+    """Truncate a Telegraph title to a safe UTF-8 byte length.
+
+    Telegraph rejects titles over its byte limit. CJK titles blow up fast
+    (1 char = 3 bytes), so we truncate by BYTES, never by character count,
+    and stop on a UTF-8 boundary so no multi-byte char is split.
+    """
+    t = (title or '').strip() or 'Untitled'
+    enc = t.encode('utf-8')
+    if len(enc) <= max_bytes:
+        return t
+    enc = enc[:max_bytes]
+    while enc and (enc[-1] & 0xC0) == 0x80:
+        enc = enc[:-1]
+    return enc.decode('utf-8', errors='ignore').rstrip() + '…'
+
+
 def create_page(
     title: str,
     telegraph_urls: list[str],
@@ -175,9 +192,9 @@ def create_page(
     page_urls = []
     for i, page_content in enumerate(pages):
         if len(pages) > 1:
-            page_title = f"{title[:40]} ({i+1}/{len(pages)})"
+            page_title = f"{_truncate_title(title, 96)} ({i+1}/{len(pages)})"
         else:
-            page_title = title[:80]
+            page_title = _truncate_title(title, 120)
 
         # Retry with backoff on FLOOD_WAIT
         for attempt in range(5):

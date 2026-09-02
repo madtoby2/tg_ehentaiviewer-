@@ -3,6 +3,10 @@
 
 # Runtime data
 usage_limits.json
+
+ranking_cache.json
+subscriptions.json
+subscription_notify_state.json
 .hermes-tmp.*
 .telegraph_token.json
 

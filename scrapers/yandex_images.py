@@ -1,9 +1,11 @@
 """Yandex Images general reverse-search uploader."""
 import logging
+import io
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit, parse_qsl, urlencode
 import requests
 from bs4 import BeautifulSoup
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 UPLOAD_URL = ('https://yandex.com/images/search?rpt=imageview&format=json&request='
@@ -67,7 +69,10 @@ def download_previews(sites: list[dict], directory: str, limit: int = 4, max_byt
     dest = Path(directory)
     dest.mkdir(parents=True, exist_ok=True)
     out = []
-    for index, site in enumerate(sites[:limit], 1):
+    fingerprints = []
+    for site in sites:
+        if len(out) >= limit:
+            break
         url = site.get('image_url', '')
         if url.startswith('//'):
             url = 'https:' + url
@@ -79,9 +84,18 @@ def download_previews(sites: list[dict], directory: str, limit: int = 4, max_byt
             content_type = resp.headers.get('content-type', '').split(';')[0].lower()
             if not content_type.startswith('image/') or len(resp.content) > max_bytes:
                 continue
-            suffix = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}.get(content_type, ".jpg")
-            path = dest / f"match_{index}{suffix}"
-            path.write_bytes(resp.content)
+            with Image.open(io.BytesIO(resp.content)) as image:
+                gray = image.convert('L').resize((9, 8), Image.Resampling.LANCZOS)
+                pixels = list(gray.get_flattened_data())
+                fingerprint = sum(
+                    (pixels[row * 9 + col] > pixels[row * 9 + col + 1]) << (row * 8 + col)
+                    for row in range(8) for col in range(8)
+                )
+                if any((fingerprint ^ old).bit_count() <= 4 for old in fingerprints):
+                    continue
+                fingerprints.append(fingerprint)
+                path = dest / f"match_{len(out) + 1}.jpg"
+                image.convert('RGB').save(path, 'JPEG', quality=90)
             out.append({**site, 'path': str(path)})
         except Exception as e:
             logger.info("Yandex preview download skipped: %s", e)

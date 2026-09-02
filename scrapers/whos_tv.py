@@ -14,6 +14,7 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 BASE_URL = "https://whos.tv"
@@ -168,6 +169,59 @@ class WhosTvClient:
                 continue
             raise RuntimeError(f"Whos.tv search failed: {result_url[:120]}")
         raise TimeoutError(f"Whos.tv search timed out after {self.max_wait}s")
+
+
+def download_match_previews(matches, directory, limit: int = 3, max_bytes: int = 8 * 1024 * 1024):
+    """Download a bounded set of Whos.tv matched frames for visual confirmation."""
+    output = []
+    root = Path(directory)
+    root.mkdir(parents=True, exist_ok=True)
+    for item in matches:
+        if len(output) >= limit:
+            break
+        url = item.get("preview") or ""
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            continue
+        response = None
+        target = None
+        raw_target = None
+        try:
+            response = requests.get(url, timeout=20, stream=True)
+            response.raise_for_status()
+            if not response.headers.get("Content-Type", "").lower().startswith("image/"):
+                continue
+            suffix = Path(parsed.path).suffix.lower()
+            if suffix not in (".jpg", ".jpeg", ".png", ".webp"):
+                suffix = ".jpg"
+            target = root / f"whos_{len(output) + 1}.jpg"
+            raw_target = root / f"whos_raw_{len(output) + 1}{suffix}"
+            total = 0
+            with open(raw_target, 'wb') as handle:
+                for chunk in response.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise ValueError("preview too large")
+                    handle.write(chunk)
+            with Image.open(raw_target) as image:
+                image.convert('RGB').save(target, 'JPEG', quality=90)
+            raw_target.unlink(missing_ok=True)
+            total = target.stat().st_size
+            if total:
+                output.append({**item, "path": str(target)})
+            else:
+                target.unlink(missing_ok=True)
+        except Exception:
+            if target:
+                target.unlink(missing_ok=True)
+            if raw_target:
+                raw_target.unlink(missing_ok=True)
+        finally:
+            if response is not None:
+                response.close()
+    return output
 
 
 def search(username: str, password: str, image_path: str) -> dict | None:

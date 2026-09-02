@@ -15,14 +15,19 @@ def _clock(seconds: float) -> str:
 def parse_results(data: dict, min_similarity: float = 0.87) -> list[dict]:
     raw = data.get("result", []) if isinstance(data, dict) else []
     # trace.moe always returns nearest neighbors, even for unrelated photos.
-    # If two different anime tie at the top, this is not a trustworthy match.
+    # Compare the top result with the first candidate from a different anime;
+    # duplicate frames from one title can otherwise hide an ambiguous match.
     if len(raw) >= 2:
         first_sim = float(raw[0].get("similarity") or 0)
-        second_sim = float(raw[1].get("similarity") or 0)
         first_id = (raw[0].get("anilist") or {}).get("id")
-        second_id = (raw[1].get("anilist") or {}).get("id")
-        if first_id != second_id and first_sim - second_sim < 0.01:
-            return []
+        different = next(
+            (item for item in raw[1:] if (item.get("anilist") or {}).get("id") != first_id),
+            None,
+        )
+        if different is not None:
+            different_sim = float(different.get("similarity") or 0)
+            if first_sim - different_sim < 0.01:
+                return []
     out = []
     for item in raw:
         sim = float(item.get("similarity") or 0)

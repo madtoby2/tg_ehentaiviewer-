@@ -19,6 +19,10 @@ Telegram bot — 发链接直接看图：支持 **EHentai** 与 **18comic**（�
 | `/help` | 帮助 |
 | `/daily` | 查看今日剩余次数 |
 | `/stats` | 使用统计（管理员） |
+| `/health` | 上游、积分、缓存和临时文件健康检查（管理员） |
+| `/subscribe 标签 纯爱` | 订阅作者、标签或女优 |
+| `/unsubscribe 标签 纯爱` | 取消订阅 |
+| `/subscriptions` | 查看明确订阅项 |
 | `/cancel` | 取消当前任务 |
 
 **固定键盘（custom keyboard，输入框下方）：** `/start` 后自动出现，点击即用：
@@ -28,6 +32,8 @@ Telegram bot — 发链接直接看图：支持 **EHentai** 与 **18comic**（�
 - `🏆 当日排行` — 热门排行（仅管理员可见）
 
 **任意图片查出处：** 直接发图片给 bot（私聊直接发；群里需 @bot 或回复 bot），并行聚合：
+- 支持 Telegram 图片及以文件发送的 JPG/PNG/WebP 原图
+
 - **Whos.tv**：AV 截图专用识别，直接返回番号、相似度、匹配帧与精准时间点（需配置专用账号）
 - **Yandex Images**：通用相似图和网页来源，适合真人、AV 截图、商品、表情包等
 - **trace.moe**：动画截图识别，返回动画名、集数、时间点和预览
@@ -36,6 +42,8 @@ Telegram bot — 发链接直接看图：支持 **EHentai** 与 **18comic**（�
 - **Saucenao**：可选增强，覆盖 Pixiv / Twitter / E-Hentai 等。多个 API key 用逗号分隔，自动轮询（N 个 key ≈ 100N 次/天）
 
 只有匹配到 EH/18comic 画廊时才显示「📖 生成阅读页」。配置示例：`SAUCENAO_API_KEY=key1,key2,key3`。
+
+每日排行会提前低并发生成并缓存阅读页；作者/标签/女优订阅只保存用户明确添加的关键词，不记录搜索、阅读或识图历史。
 
 直接发链接或文字消息（URL / tag 搜索词）即可触发处理流程。
 

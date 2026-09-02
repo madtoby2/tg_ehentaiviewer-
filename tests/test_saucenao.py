@@ -265,6 +265,63 @@ class PhotoHandlerTests(unittest.TestCase):
         self.assertIn("01:00:40", text)
         self.assertIn("https://whos.tv/videos/gana-2823", text)
 
+    def test_low_confidence_whos_match_is_not_presented_as_av_identification(self):
+        self._reload(EHBOT_TELEGRAM_TOKEN="x", WHOS_TV_USERNAME="user", WHOS_TV_PASSWORD="secret")
+        update = self._photo_update(); ctx = self._ctx()
+        whos = {"result_url":"https://whos.tv/search-img/t","matches":[
+            {"code":"FALSE-001","similarity":86.3,"at":"00:00:55","url":"https://whos.tv/videos/false-001","preview":"https://img.test/f.webp"}
+        ]}
+        yandex={"search_url":"https://yandex.test/result","sites":[]}
+        with mock.patch('bot.whos_tv_search',return_value=whos), mock.patch('bot.whos_download_previews') as previews, \
+             mock.patch('bot.iqdb_search',return_value=[]), mock.patch('bot.trace_moe_search',return_value=[]), \
+             mock.patch('bot.yandex_image_search',return_value=yandex), mock.patch('bot.screenshot_ocr',return_value=''), \
+             mock.patch.object(bot,'consume_daily_quota',return_value=(True,9)), \
+             mock.patch.object(Message,'reply_text',new=mock.AsyncMock()) as reply:
+            reply.return_value.edit_text=mock.AsyncMock(); asyncio.run(bot.handle_photo(update,ctx))
+        text=reply.return_value.edit_text.await_args.args[0]
+        self.assertNotIn('Whos.tv AV 画面匹配',text)
+        self.assertIn('低置信候选',text)
+        self.assertIn('FALSE-001',text)
+        self.assertIn('Yandex',text)
+        previews.assert_called_once()
+
+    def test_whos_match_previews_are_sent_as_album(self):
+        self._reload(EHBOT_TELEGRAM_TOKEN="x", WHOS_TV_USERNAME="user", WHOS_TV_PASSWORD="secret")
+        update = self._photo_update(); ctx = self._ctx()
+        whos = {"result_url": "https://whos.tv/search-img/t", "matches": [
+            {"code": f"A-{i:03d}", "similarity": 99-i, "at": "00:01:00",
+             "url": f"https://whos.tv/videos/a-{i:03d}", "preview": f"https://img.test/{i}.webp"}
+            for i in range(2)
+        ]}
+        def fake_download(matches, directory, limit=3):
+            out=[]
+            for i, item in enumerate(matches):
+                p=Path(directory)/f'w{i}.jpg'; p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(b'jpeg')
+                out.append({**item,'path':str(p)})
+            return out
+        with mock.patch('bot.whos_tv_search', return_value=whos), \
+             mock.patch('bot.whos_download_previews', side_effect=fake_download), \
+             mock.patch('bot.iqdb_search', return_value=[]), mock.patch('bot.trace_moe_search', return_value=[]), \
+             mock.patch('bot.yandex_image_search', return_value=None), mock.patch('bot.screenshot_ocr', return_value=''), \
+             mock.patch.object(bot,'consume_daily_quota',return_value=(True,9)), \
+             mock.patch.object(Message,'reply_text',new=mock.AsyncMock()) as reply:
+            reply.return_value.edit_text=mock.AsyncMock(); asyncio.run(bot.handle_photo(update,ctx))
+        ctx.bot.send_media_group.assert_not_awaited()
+        self.assertEqual(ctx.bot.send_photo.await_count,2)
+        first=ctx.bot.send_photo.await_args_list[0].kwargs
+        second=ctx.bot.send_photo.await_args_list[1].kwargs
+        self.assertIn('A-000',first['caption'])
+        self.assertIn('99.0%',first['caption'])
+        self.assertIn('00:01:00',first['caption'])
+        self.assertNotIn('https://whos.tv/videos/a-000',first['caption'])
+        first_buttons=first['reply_markup'].inline_keyboard
+        self.assertEqual(first_buttons[0][0].text,'🎬 查看影片')
+        self.assertEqual(first_buttons[0][0].url,'https://whos.tv/videos/a-000')
+        self.assertIn('A-001',second['caption'])
+        self.assertEqual(second['reply_markup'].inline_keyboard[0][0].url,'https://whos.tv/videos/a-001')
+        self.assertEqual(first['parse_mode'],'HTML')
+        self.assertEqual([p for p in Path('/tmp').glob('ris_*') if p.is_dir()],[])
+
     def test_general_image_results_include_yandex_anime_and_av_code(self):
         """Any screenshot gets a Yandex result page; anime and AV clues are shown when detected."""
         self._reload(EHBOT_TELEGRAM_TOKEN="x")

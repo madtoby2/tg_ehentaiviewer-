@@ -311,6 +311,17 @@ class CustomKeyboardTests(unittest.TestCase):
             asyncio.run(bot.handle_menu_button(update, ctx))
         rec.assert_awaited_once_with(update, ctx)
 
+    def test_image_search_menu_button_prompts_for_image_and_shows_quota(self):
+        self._reload(EHBOT_TELEGRAM_TOKEN="x", EHBOT_DAILY_LIMIT="10")
+        update = _make_update(100, "private", 999, "🖼 图片搜索")
+        ctx = mock.Mock()
+        with mock.patch.object(bot, "consume_daily_quota", return_value=(True, 7)), \
+             mock.patch.object(Message, "reply_text", new=mock.AsyncMock()) as reply:
+            asyncio.run(bot.handle_menu_button(update, ctx))
+        text=reply.await_args.args[0]
+        self.assertIn("直接发送图片", text)
+        self.assertIn("7", text)
+
     def test_non_menu_text_not_dispatched(self):
         """Normal text (links, chat) must not be eaten by the menu router."""
         self._reload(EHBOT_TELEGRAM_TOKEN="x")

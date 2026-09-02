@@ -2,8 +2,10 @@
 import sys
 import tempfile
 import unittest
+import io
 from pathlib import Path
 from unittest import mock
+from PIL import Image
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path: sys.path.insert(0, str(ROOT))
 from scrapers import yandex_images
@@ -45,13 +47,34 @@ class YandexImagesTests(unittest.TestCase):
             {'image_url': f'https://img.test/{i}.jpg', 'title': f'T{i}', 'domain': 'img.test', 'url': 'https://src.test'}
             for i in range(6)
         ]
-        good = mock.Mock(headers={'content-type': 'image/jpeg'}, content=b'jpeg'); good.raise_for_status=mock.Mock()
+        buf=io.BytesIO(); Image.new('RGB',(32,32),'white').save(buf,'JPEG'); jpeg=buf.getvalue()
+        good = mock.Mock(headers={'content-type': 'image/jpeg'}, content=jpeg); good.raise_for_status=mock.Mock()
         bad = mock.Mock(headers={'content-type': 'text/html'}, content=b'html'); bad.raise_for_status=mock.Mock()
-        with tempfile.TemporaryDirectory() as d, mock.patch('requests.get', side_effect=[good, bad, good, good, good]) as get:
+        with tempfile.TemporaryDirectory() as d, mock.patch('requests.get', side_effect=[good, bad, good, good, good, good]) as get:
             paths = yandex_images.download_previews(sites, d, limit=4)
-            self.assertEqual(len(paths), 3)
+            self.assertEqual(len(paths), 1)
             self.assertTrue(all(Path(x['path']).exists() for x in paths))
-            self.assertEqual(get.call_count, 4)
+            self.assertEqual(get.call_count, 6)
+
+    def test_download_previews_deduplicates_same_visual_from_different_urls(self):
+        def encoded(reverse=False, quality=90):
+            image=Image.new('RGB',(32,32),'white')
+            for y in range(32):
+                for x in range(32):
+                    if (x < y) != reverse: image.putpixel((x,y),(20,20,20))
+            buf=io.BytesIO(); image.save(buf,'JPEG',quality=quality); return buf.getvalue()
+        same_a=mock.Mock(headers={'content-type':'image/jpeg'},content=encoded(False,95)); same_a.raise_for_status=mock.Mock()
+        same_b=mock.Mock(headers={'content-type':'image/jpeg'},content=encoded(False,70)); same_b.raise_for_status=mock.Mock()
+        other=mock.Mock(headers={'content-type':'image/jpeg'},content=encoded(True,90)); other.raise_for_status=mock.Mock()
+        sites=[
+            {'image_url':'https://img.test/a.jpg','title':'A','domain':'a.test','url':'https://a.test/1'},
+            {'image_url':'https://img.test/b.jpg','title':'B','domain':'b.test','url':'https://b.test/2'},
+            {'image_url':'https://img.test/c.jpg','title':'C','domain':'c.test','url':'https://c.test/3'},
+        ]
+        with tempfile.TemporaryDirectory() as d, mock.patch('requests.get',side_effect=[same_a,same_b,other]):
+            out=yandex_images.download_previews(sites,d,limit=4)
+        self.assertEqual([x['title'] for x in out],['A','C'])
+        self.assertEqual([Path(x['path']).name for x in out],['match_1.jpg','match_2.jpg'])
 
     def test_upload_posts_image(self):
         with tempfile.NamedTemporaryFile(suffix='.jpg') as f:

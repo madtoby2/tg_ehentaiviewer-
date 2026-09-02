@@ -33,7 +33,8 @@ from scrapers.iqdb import search_hard_timeout as iqdb_search
 from scrapers.trace_moe import search as trace_moe_search
 from scrapers.yandex_images import search as yandex_image_search, download_previews as yandex_download_previews
 from scrapers.screenshot_ocr import ocr as screenshot_ocr, extract_av_codes
-from scrapers.whos_tv import search as whos_tv_search
+from scrapers.whos_tv import search as whos_tv_search, download_match_previews as whos_download_previews
+
 from publishers.jm_telegraph import publish_jm_gallery, publish_eh_gallery
 
 logging.basicConfig(
@@ -58,8 +59,9 @@ DAILY_LIMIT = int(os.environ.get('EHBOT_DAILY_LIMIT', '10'))
 # Reverse image search via Saucenao (https://saucenao.com, free API key).
 # Comma-separated keys are rotated round-robin (N keys = 100N searches/day).
 SAUCENAO_API_KEYS = [k.strip() for k in os.environ.get('SAUCENAO_API_KEY', '').split(',') if k.strip()]
-WHOS_TV_USERNAME = os.environ.get('WHOS_TV_USERNAME', '').strip()
-WHOS_TV_PASSWORD = os.environ.get('WHOS_TV_PASSWORD', '')
+WHOS_TV_USERNAME = os.getenv("WHOS_TV_USERNAME", "").strip()
+WHOS_TV_PASSWORD = os.getenv("WHOS_TV_PASSWORD", "").strip()
+WHOS_TV_MIN_SIMILARITY = float(os.getenv("WHOS_TV_MIN_SIMILARITY", "90"))
 _sn_key_index = 0
 
 
@@ -72,6 +74,10 @@ def _next_saucenao_key() -> str | None:
     _sn_key_index += 1
     return key
 USAGE_FILE = Path(os.environ.get('EHBOT_USAGE_FILE', '/root/eh-reader-bot/usage_limits.json'))
+
+RANKING_CACHE_FILE = Path(os.environ.get('EHBOT_RANKING_CACHE_FILE', '/root/eh-reader-bot/ranking_cache.json'))
+SUBSCRIPTIONS_FILE = Path(os.environ.get('EHBOT_SUBSCRIPTIONS_FILE', '/root/eh-reader-bot/subscriptions.json'))
+SUBSCRIPTION_NOTIFY_STATE_FILE = Path(os.environ.get('EHBOT_SUBSCRIPTION_NOTIFY_STATE_FILE', '/root/eh-reader-bot/subscription_notify_state.json'))
 TZ_UTC8 = timezone(timedelta(hours=8))
 MAX_PAGES = int(os.environ.get('EHBOT_MAX_PAGES', '0'))
 MAX_WORKERS = int(os.environ.get('EHBOT_MAX_WORKERS', '5'))
@@ -352,7 +358,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # routed by handle_menu_button.
     rows = [
         [KeyboardButton("🎲 随机推荐"), KeyboardButton("🔍 标签搜索")],
-        [KeyboardButton("📊 今日额度")],
+        [KeyboardButton("🖼 图片搜索"), KeyboardButton("📊 今日额度")],
     ]
     if is_owner(user_id):
         rows.append([KeyboardButton("🏆 当日排行")])
@@ -372,11 +378,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>🔍 任意图片查出处</b>\n"
         "直接发送漫画、插画、动画截图、AV 截图、真人或商品图片：\n"
         "• 通用相似图与网页来源\n"
-        "• Whos.tv AV 番号、相似度与精准时间点\n"
+        "• Whos.tv AV 番号、片名、相似度、匹配帧与精准时间点\n"
         "• 动画名称、集数和时间点\n"
         "• OCR 提取截图中的番号、水印和文字\n"
+        "支持图片消息及 JPG/PNG/WebP 原图文件。\n"
         "匹配到 EH / 18comic 后，还可点击「📖 生成阅读页」。\n\n"
-        "也可以点击下方固定按钮：随机推荐、标签搜索、今日额度。"
+        "也可以点击下方固定按钮：随机推荐、标签搜索、图片搜索、今日额度。"
         f"{group_hint}\n\n"
         "更多精彩尽在黄油频道 🧈 @huangyoustore",
         parse_mode='HTML',
@@ -396,7 +403,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<b>命令：</b>\n"
         "• <code>/start</code> - 欢迎\n"
         "• <code>/help</code> - 帮助\n"
-        "• <code>/daily</code> - 查看今日剩余次数\n\n"
+        "• <code>/daily</code> - 查看今日剩余次数\n"
+        "• <code>/subscribe 类型 关键词</code> - 订阅作者/标签/女优\n"
+        "• <code>/subscriptions</code> - 查看订阅\n"
+        "• <code>/health</code> - 管理员健康检查\n\n"
         "🧈 <b>黄油频道</b> @huangyoustore",
         parse_mode='HTML'
     )
@@ -411,7 +421,25 @@ MENU_ROUTES = {
     "🔍 标签搜索": "handle_search_start",
     "🏆 当日排行": "handle_ranking",
     "📊 今日额度": "daily_command",
+    "🖼 图片搜索": "image_search_prompt",
 }
+
+
+async def image_search_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Explain image-search input without consuming quota."""
+    user_id = update.effective_user.id if update.effective_user else 0
+    if is_owner(user_id):
+        quota = "♾️ Owner 不限次数"
+    else:
+        _, remaining = consume_daily_quota(user_id, 0)
+        quota = f"今日剩余：{remaining} / {DAILY_LIMIT} 次"
+    await update.message.reply_text(
+        "🖼 <b>图片搜索</b>\n\n"
+        "直接发送图片，或发送 JPG / PNG / WebP 原图文件。\n"
+        "支持 Whos.tv AV 匹配帧、动画识别和网页相似图来源。\n\n"
+        f"📊 {quota}",
+        parse_mode='HTML',
+    )
 
 
 async def handle_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -594,7 +622,12 @@ class _CallbackStatus:
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Reverse image search: send a photo → Saucenao matches → optional
     'generate reader page' button for e-hentai/18comic matches."""
-    if not update.message or not update.message.photo:
+    message = update.message
+    document = message.document if message else None
+    image_document = bool(document and (document.mime_type or "").lower() in (
+        "image/jpeg", "image/png", "image/webp",
+    ))
+    if not message or (not message.photo and not image_document):
         return
 
     # Group mode: same trigger rules as links (@mention or reply-to-bot).
@@ -628,17 +661,19 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     _processing.add(lock)
     tmpdir = tempfile.mkdtemp(prefix="ris_")
     try:
-        photo = update.message.photo[-1]
-        file = await context.bot.get_file(photo.file_id)
-        img_path = Path(tmpdir) / "query.jpg"
+        image_obj = document if image_document else update.message.photo[-1]
+        file = await context.bot.get_file(image_obj.file_id)
+        suffix = Path(document.file_name or "").suffix.lower() if image_document else ".jpg"
+        if suffix not in (".jpg", ".jpeg", ".png", ".webp"):
+            suffix = ".jpg"
+        img_path = Path(tmpdir) / f"query{suffix}"
         await file.download_to_drive(custom_path=str(img_path))
 
         loop = asyncio.get_event_loop()
         await status.edit_text("🔍 正在搜图匹配中...")
 
         # Run general and specialist engines in parallel. IQDB gets its own
-        # hard process deadline; every local file is still owned by tmpdir and
-        # removed by the outer finally block.
+        # hard process deadline; every local file is still owned by tmpdir.
         tasks = [
             loop.run_in_executor(None, iqdb_search, str(img_path)),
             loop.run_in_executor(None, trace_moe_search, str(img_path)),
@@ -646,16 +681,35 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             loop.run_in_executor(None, screenshot_ocr, str(img_path)),
         ]
         whos_index = None
+        whos_future = None
         if WHOS_TV_USERNAME and WHOS_TV_PASSWORD:
             whos_index = len(tasks)
-            tasks.append(loop.run_in_executor(
+            whos_future = loop.run_in_executor(
                 None, whos_tv_search, WHOS_TV_USERNAME, WHOS_TV_PASSWORD, str(img_path)
-            ))
+            )
+            tasks.append(whos_future)
         sn_key = _next_saucenao_key()
         sn_index = None
         if sn_key:
             sn_index = len(tasks)
             tasks.append(loop.run_in_executor(None, saucenao_search, sn_key, str(img_path)))
+        if whos_future is not None:
+            try:
+                early_whos = await whos_future
+                trusted_matches = [
+                    match for match in (early_whos.get('matches') or [])
+                    if float(match.get('similarity') or 0) >= WHOS_TV_MIN_SIMILARITY
+                ] if isinstance(early_whos, dict) else []
+                if trusted_matches:
+                    top = trusted_matches[0]
+                    at = f" · {top.get('at')}" if top.get('at') else ""
+                    title = f"\n{top.get('title')}" if top.get('title') and top.get('title') != top.get('code') else ""
+                    await status.edit_text(
+                        f"🎯 Whos.tv 已命中：{top['code']} · {top['similarity']:.1f}%{at}{title}\n"
+                        "🔍 正在补充其他来源..."
+                    )
+            except Exception:
+                pass
         done = await asyncio.gather(*tasks, return_exceptions=True)
 
         iq_results = done[0] if isinstance(done[0], list) else []
@@ -663,16 +717,26 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         yandex_result = done[2] if isinstance(done[2], dict) else None
         ocr_text = done[3] if isinstance(done[3], str) else ""
         whos_result = done[whos_index] if whos_index is not None and isinstance(done[whos_index], dict) else None
-        source_results = list(iq_results)
-        if sn_index is not None and isinstance(done[sn_index], list):
-            source_results.extend(done[sn_index])
+        whos_candidates = list((whos_result or {}).get('matches') or [])
+        if whos_result:
+            whos_result = {
+                **whos_result,
+                'matches': [
+                    match for match in (whos_result.get('matches') or [])
+                    if float(match.get('similarity') or 0) >= WHOS_TV_MIN_SIMILARITY
+                ],
+            }
+        sauce_results = done[sn_index] if sn_index is not None and isinstance(done[sn_index], list) else []
+        source_results = list(iq_results) + list(sauce_results)
+
+
         for r in source_results:
             r.setdefault('index_name', 'IQDB')
         source_results.sort(key=lambda r: r['similarity'], reverse=True)
         source_results = source_results[:5]
         av_codes = extract_av_codes(ocr_text)
 
-        if not source_results and not anime_results and not yandex_result and not av_codes and not (whos_result and whos_result.get('matches')):
+        if not source_results and not anime_results and not yandex_result and not av_codes and not whos_candidates:
             await status.edit_text("❌ 未找到匹配的图片来源")
             return
 
@@ -681,12 +745,25 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines.append("🎯 <b>Whos.tv AV 画面匹配：</b>")
             for match in whos_result['matches'][:3]:
                 at = f" · <code>{html.escape(match['at'])}</code>" if match.get('at') else ""
+                title = match.get('title') or match['code']
+                if title != match['code']:
+                    title = f"\n  └ {html.escape(title)}"
+                else:
+                    title = ""
+                lines.append(
+                    f"• <a href=\"{html.escape(match['url'])}\"><code>{html.escape(match['code'])}</code></a>"
+                    f" · {match['similarity']:.1f}%{at}{title}"
+                )
+            if whos_result.get('result_url'):
+                lines.append(f"🔎 <a href=\"{html.escape(whos_result['result_url'])}\">查看 Whos.tv 完整结果</a>")
+        elif whos_candidates:
+            lines.append("⚠️ <b>Whos.tv 低置信候选（仅供画面对比）：</b>")
+            for match in whos_candidates[:3]:
+                at = f" · <code>{html.escape(match['at'])}</code>" if match.get('at') else ""
                 lines.append(
                     f"• <a href=\"{html.escape(match['url'])}\"><code>{html.escape(match['code'])}</code></a>"
                     f" · {match['similarity']:.1f}%{at}"
                 )
-            if whos_result.get('result_url'):
-                lines.append(f"🔎 <a href=\"{html.escape(whos_result['result_url'])}\">查看 Whos.tv 完整结果</a>")
 
         if av_codes:
             lines.append("🎬 <b>OCR 识别到番号：</b> " + "、".join(f"<code>{c}</code>" for c in av_codes[:5]))
@@ -732,6 +809,41 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             disable_web_page_preview=True,
             reply_markup=InlineKeyboardMarkup(btns) if btns else None,
         )
+
+        # Send Whos.tv matched frames first for direct visual confirmation.
+        preview_matches = (whos_result or {}).get('matches') or whos_candidates[:3]
+        if preview_matches:
+            whos_previews = await loop.run_in_executor(
+                None, whos_download_previews,
+                preview_matches[:3], str(Path(tmpdir) / 'whos_matches'), 3,
+            )
+            if whos_previews:
+                for item in whos_previews:
+                    at = f" · {html.escape(item['at'])}" if item.get('at') else ""
+                    trusted = item['similarity'] >= WHOS_TV_MIN_SIMILARITY
+                    code = html.escape(item['code'])
+                    video_url = item.get('url') or ''
+                    frame_url = item.get('frame_url') or ''
+                    confidence = "高置信匹配" if trusted else "低置信候选 · 仅供对比"
+                    caption = (
+                        f"{'🎯' if trusted else '⚠️'} <b>{code}</b>\n"
+                        f"{confidence}\n"
+                        f"相似度：<b>{item['similarity']:.1f}%</b>{at}"
+                    )
+                    buttons = []
+                    row = []
+                    if video_url:
+                        row.append(InlineKeyboardButton("🎬 查看影片", url=video_url))
+                    if frame_url:
+                        row.append(InlineKeyboardButton("🖼 查看匹配帧", url=frame_url))
+                    if row:
+                        buttons.append(row)
+                    with open(item['path'], 'rb') as photo:
+                        await context.bot.send_photo(
+                            chat_id=chat_id, photo=photo, caption=caption,
+                            parse_mode='HTML',
+                            reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+                        )
 
         # Send up to four directly matched images so the user can compare
         # visually. Files live under this task's tmpdir and are deleted in the
@@ -806,6 +918,183 @@ async def handle_ris_read(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"❌ 处理失败：{str(e)[:200]}")
     finally:
         _processing.discard(lock)
+
+
+def _load_subscriptions():
+    try:
+        data = json.loads(SUBSCRIPTIONS_FILE.read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_subscriptions(data):
+    SUBSCRIPTIONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SUBSCRIPTIONS_FILE.with_name(f".{SUBSCRIPTIONS_FILE.name}.{os.getpid()}.{id(data)}.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+    os.replace(tmp, SUBSCRIPTIONS_FILE)
+
+
+def list_subscriptions(user_id):
+    return _load_subscriptions().get(str(user_id), [])
+
+
+def add_subscription(user_id, kind, term):
+    data = _load_subscriptions(); key = str(user_id)
+    item = {'type': kind, 'term': term.strip()}
+    current = data.setdefault(key, [])
+    if any(x.get('type') == item['type'] and x.get('term', '').casefold() == item['term'].casefold() for x in current):
+        return False
+    current.append(item); _save_subscriptions(data); return True
+
+
+def remove_subscription(user_id, kind, term):
+    data = _load_subscriptions(); key = str(user_id); current = data.get(key, [])
+    kept = [x for x in current if not (x.get('type') == kind and x.get('term', '').casefold() == term.strip().casefold())]
+    if len(kept) == len(current):
+        return False
+    data[key] = kept; _save_subscriptions(data); return True
+
+
+def match_subscriptions(subscriptions, items):
+    hits = []
+    for subscription in subscriptions:
+        term = subscription.get('term', '').casefold()
+        for item in items:
+            haystack = ' '.join([item.get('title', ''), *[str(x) for x in item.get('tags', [])]]).casefold()
+            if term and term in haystack:
+                hits.append({'subscription': subscription, 'item': item})
+                break
+    return hits
+
+
+async def subscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not chat_allowed(update):
+        await update.message.reply_text("⚠️ 你没有权限使用此 bot")
+        return
+    if len(context.args) < 2 or context.args[0] not in ('作者', '标签', '女优'):
+        await update.message.reply_text("用法：/subscribe 类型 关键词\n类型支持：作者、标签、女优")
+        return
+    kind, term = context.args[0], ' '.join(context.args[1:]).strip()
+    added = await asyncio.get_event_loop().run_in_executor(None, add_subscription, update.effective_user.id, kind, term)
+    await update.message.reply_text(("✅ 已订阅：" if added else "ℹ️ 已存在：") + f"{kind} · {term}")
+
+
+async def unsubscribe_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not chat_allowed(update):
+        await update.message.reply_text("⚠️ 你没有权限使用此 bot")
+        return
+    if len(context.args) < 2 or context.args[0] not in ('作者', '标签', '女优'):
+        await update.message.reply_text("用法：/unsubscribe 类型 关键词")
+        return
+    kind, term = context.args[0], ' '.join(context.args[1:]).strip()
+    removed = await asyncio.get_event_loop().run_in_executor(None, remove_subscription, update.effective_user.id, kind, term)
+    await update.message.reply_text(("✅ 已取消：" if removed else "ℹ️ 未找到：") + f"{kind} · {term}")
+
+
+async def subscriptions_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not chat_allowed(update):
+        await update.message.reply_text("⚠️ 你没有权限使用此 bot")
+        return
+    items = await asyncio.get_event_loop().run_in_executor(None, list_subscriptions, update.effective_user.id)
+    if not items:
+        await update.message.reply_text("暂无订阅。\n添加：/subscribe 标签 纯爱")
+        return
+    await update.message.reply_text("🔔 我的订阅\n" + '\n'.join(f"• {x['type']} · {x['term']}" for x in items))
+
+
+async def notify_subscription_matches(context: ContextTypes.DEFAULT_TYPE):
+    cache = _load_ranking_cache()
+    items = (cache.get('eh') or []) + (cache.get('comic') or [])
+    try:
+        sent_state = json.loads(SUBSCRIPTION_NOTIFY_STATE_FILE.read_text(encoding='utf-8'))
+    except Exception:
+        sent_state = {}
+    def save_state():
+        SUBSCRIPTION_NOTIFY_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = SUBSCRIPTION_NOTIFY_STATE_FILE.with_name(
+            f".{SUBSCRIPTION_NOTIFY_STATE_FILE.name}.{os.getpid()}.{id(sent_state)}.tmp"
+        )
+        tmp.write_text(json.dumps(sent_state, ensure_ascii=False), encoding='utf-8')
+        os.replace(tmp, SUBSCRIPTION_NOTIFY_STATE_FILE)
+
+    for user_id, subscriptions in _load_subscriptions().items():
+        sent = set(sent_state.get(user_id, []))
+        for hit in match_subscriptions(subscriptions, items):
+            item = hit['item']; sub = hit['subscription']; link = item.get('tg_url') or item.get('url')
+            identity = item.get('url') or link
+            if not link or identity in sent:
+                continue
+            try:
+                await context.bot.send_message(
+                    chat_id=int(user_id),
+                    text=f"🔔 订阅命中：{sub['type']} · {sub['term']}\n<a href=\"{html.escape(link)}\">{html.escape(item.get('title', '?'))}</a>",
+                    parse_mode='HTML', disable_web_page_preview=True,
+                )
+            except Exception as exc:
+                logger.warning("Subscription notification failed for user %s: %s", user_id, type(exc).__name__)
+                continue
+            sent.add(identity)
+            sent_state[user_id] = list(sent)[-500:]
+            save_state()
+        sent_state[user_id] = list(sent)[-500:]
+
+
+async def health_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not is_owner(user_id):
+        await update.message.reply_text("⚠️ /health 仅管理员可用")
+        return
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(None, _health_probe)
+    labels = {
+        'telegraph': 'Telegraph', 'whos': 'Whos.tv', 'catbox': 'Catbox',
+        'temp': '临时文件',
+    }
+    lines = ["🩺 <b>EH Reader 健康状态</b>"]
+    for key in ('telegraph', 'whos', 'catbox', 'temp'):
+        ok, detail = data.get(key, (False, '未知'))
+        lines.append(f"{'✅' if ok else '⚠️'} <b>{labels[key]}</b>：{html.escape(str(detail))}")
+    await update.message.reply_text("\n".join(lines), parse_mode='HTML')
+
+
+def _health_probe():
+    import glob
+
+    import requests
+    result = {}
+    try:
+        response = requests.get('https://api.telegra.ph/getPageList', timeout=8)
+        result['telegraph'] = (response.status_code < 500, f"HTTP {response.status_code}")
+    except Exception as exc:
+        result['telegraph'] = (False, type(exc).__name__)
+    try:
+        response = requests.get('https://catbox.moe/', timeout=8)
+        result['catbox'] = (response.status_code < 500, f"HTTP {response.status_code}")
+    except Exception as exc:
+        result['catbox'] = (False, type(exc).__name__)
+    if WHOS_TV_USERNAME and WHOS_TV_PASSWORD:
+        try:
+            with requests.Session() as session:
+                login = session.post('https://whos.tv/api/login', json={
+                    'username': WHOS_TV_USERNAME, 'password': WHOS_TV_PASSWORD,
+                }, timeout=10)
+                login.raise_for_status()
+                profile = session.get('https://whos.tv/api/user/profile', timeout=10).json().get('data') or {}
+                allowed = session.get(
+                    'https://whos.tv/api/user/points/can-search?action=search_screenshot', timeout=10,
+                ).json().get('data') or {}
+                points = profile.get('points_balance', '?')
+                required = allowed.get('required_points', '?')
+                result['whos'] = (bool(allowed.get('can_search')), f"{points}积分，单次{required}积分")
+        except Exception as exc:
+            result['whos'] = (False, type(exc).__name__)
+    else:
+        result['whos'] = (False, '未配置')
+
+    tmp_count = len(glob.glob('/tmp/ris_*'))
+    result['temp'] = (tmp_count == 0, str(tmp_count))
+    return result
 
 
 async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -973,15 +1262,12 @@ def fetch_comic_ranking() -> list[dict]:
     try:
         client = _get_client()
         from jmcomic import JmMagicConstants
-        # 先试 mv_t（最多观看），兜底 sv_t（最多收藏）、tf_t（最多点赞）
-        # 必须保持日维度，不能降级到周/月
-        page = client.day_ranking(1)
+        # 网页端"每日排行"= 点赞最多(tf_t)，以它为主排序保持与网页一致
+        # 保持日维度，不能降级到周/月；点赞榜空时兜底浏览量(day_ranking/mv_t)
+        page = client.categories_filter(1, JmMagicConstants.TIME_TODAY, JmMagicConstants.CATEGORY_ALL, 'tf')
         if not page or getattr(page, 'page_count', 0) == 0:
-            logger.info('mv_t empty, try sv_t (most subscribed today)')
-            page = client.categories_filter(1, JmMagicConstants.TIME_TODAY, JmMagicConstants.CATEGORY_ALL, 'sv')
-        if not page or getattr(page, 'page_count', 0) == 0:
-            logger.info('sv_t empty, try tf_t (most liked today)')
-            page = client.categories_filter(1, JmMagicConstants.TIME_TODAY, JmMagicConstants.CATEGORY_ALL, 'tf')
+            logger.info('tf_t empty, fallback to day_ranking (mv_t)')
+            page = client.day_ranking(1)
         content = getattr(page, 'content', [])
         results = []
         seen = set()
@@ -1025,6 +1311,70 @@ def fetch_comic_ranking() -> list[dict]:
         return []
 
 
+def _load_ranking_cache():
+    try:
+        data = json.loads(RANKING_CACHE_FILE.read_text(encoding='utf-8'))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _ranking_cache_is_fresh(cache_data, source=None):
+    try:
+        if source:
+            updated = (cache_data.get('source_updated_at') or {}).get(source)
+        else:
+            updated = cache_data.get('updated_at')
+        cache_updated = datetime.fromisoformat(updated or '')
+        return cache_updated.astimezone(TZ_UTC8).date() == datetime.now(TZ_UTC8).date()
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
+def _save_ranking_cache(data):
+    RANKING_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = RANKING_CACHE_FILE.with_name(f".{RANKING_CACHE_FILE.name}.{os.getpid()}.{id(data)}.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
+    os.replace(tmp, RANKING_CACHE_FILE)
+
+
+async def _prewarm_ranking_source(source: str):
+    loop = asyncio.get_event_loop()
+    is_eh = source == 'eh'
+    fetcher = fetch_eh_ranking if is_eh else fetch_comic_ranking
+    items = await loop.run_in_executor(None, fetcher)
+    if not items:
+        return []
+
+    async def generate(item):
+        comic_enabled = os.getenv("DAILY_RANKING_COMIC_TELEGRAPH", "0").strip().lower() in ("1", "true", "yes", "on")
+        if not is_eh and not comic_enabled:
+            return None
+        try:
+            return await loop.run_in_executor(None, _gen_tg_telegraph, item, is_eh, 0)
+        except Exception:
+            return None
+
+    # One gallery at a time: each publisher already has internal workers.
+    enriched = []
+    for item in items[:5]:
+        url = await generate(item)
+        enriched.append({**item, 'tg_url': url if isinstance(url, str) and url.startswith('http') else None})
+    return enriched
+
+
+async def prewarm_rankings(context: ContextTypes.DEFAULT_TYPE):
+    data = _load_ranking_cache()
+    source_updated = data.setdefault('source_updated_at', {})
+    for source in ('eh', 'comic'):
+        enriched = await _prewarm_ranking_source(source)
+        if enriched:
+            data[source] = enriched
+            source_updated[source] = datetime.now(TZ_UTC8).isoformat()
+    data['updated_at'] = datetime.now(TZ_UTC8).isoformat()
+    _save_ranking_cache(data)
+
+
 async def handle_ranking(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Ranking entry point: show source picker. Owner only."""
     menu = _Menu(update)
@@ -1063,7 +1413,16 @@ async def handle_ranking_list(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.edit_message_text(f"⏳ 正在获取 {'EH' if source == 'ranking_eh' else '18comic'} 排行...")
     loop = asyncio.get_event_loop()
 
-    if source == 'ranking_eh':
+    cache_key = 'eh' if source == 'ranking_eh' else 'comic'
+    cache_data = _load_ranking_cache()
+    cache_fresh = _ranking_cache_is_fresh(cache_data, cache_key)
+    cached_items = (cache_data.get(cache_key) or []) if cache_fresh else []
+    if cached_items:
+        items = cached_items
+        source_name = "E-Hentai" if cache_key == 'eh' else "18comic"
+        emoji = "🔞" if cache_key == 'eh' else "📖"
+        fetch_processor = cache_key
+    elif source == 'ranking_eh':
         items = await loop.run_in_executor(None, fetch_eh_ranking)
         source_name = "E-Hentai"
         emoji = "🔞"
@@ -1078,15 +1437,18 @@ async def handle_ranking_list(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.edit_message_text(f"❌ 获取排行失败")
         return
 
-    # Pre-generate Telegraph for all items in parallel
+    # Cache hits already contain pre-generated Telegraph URLs.
     enriched = []
-    progress_msg = await query.edit_message_text(f"⏳ 正在生成即时阅览... (0/{min(5, len(items))})")
-    loop = asyncio.get_event_loop()
-    tasks = []
-    for idx, item in enumerate(items[:5]):
-        is_eh = fetch_processor != 'comic'
-        tasks.append(loop.run_in_executor(None, _gen_tg_telegraph, item, is_eh, idx * 2.0))
-    tg_results = await asyncio.gather(*tasks, return_exceptions=True)
+    if cached_items:
+        tg_results = [item.get('tg_url') for item in items[:5]]
+    else:
+        progress_msg = await query.edit_message_text(f"⏳ 正在生成即时阅览... (0/{min(5, len(items))})")
+        loop = asyncio.get_event_loop()
+        tasks = []
+        for idx, item in enumerate(items[:5]):
+            is_eh = fetch_processor != 'comic'
+            tasks.append(loop.run_in_executor(None, _gen_tg_telegraph, item, is_eh, idx * 2.0))
+        tg_results = await asyncio.gather(*tasks, return_exceptions=True)
 
     for idx, item in enumerate(items[:5]):
         title = item['title']
@@ -1845,6 +2207,10 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("daily", daily_command))
     app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("health", health_command))
+    app.add_handler(CommandHandler("subscribe", subscribe_command))
+    app.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
+    app.add_handler(CommandHandler("subscriptions", subscriptions_command))
     app.add_handler(CommandHandler("cancel", cancel_command))
     app.add_handler(CallbackQueryHandler(handle_recommend, pattern="^recommend$"))
     app.add_handler(CallbackQueryHandler(handle_ranking, pattern="^ranking$"))
@@ -1865,6 +2231,8 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     # Reverse image search (photos); group trigger rules apply inside handler
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    image_documents = filters.Document.IMAGE
+    app.add_handler(MessageHandler(image_documents, handle_photo))
     app.add_error_handler(error_handler)
 
     # 每日定时推送排行到 @huangyoustore
@@ -1872,6 +2240,16 @@ def main():
         from datetime import time as dt_time
         job_queue = app.job_queue
         if job_queue:
+            job_queue.run_daily(
+                prewarm_rankings,
+                time=dt_time(hour=(DAILY_RANKING_HOUR - 2) % 24, minute=0, tzinfo=timezone.utc),
+                name="prewarm_rankings",
+            )
+            job_queue.run_daily(
+                notify_subscription_matches,
+                time=dt_time(hour=(DAILY_RANKING_HOUR - 1) % 24, minute=0, tzinfo=timezone.utc),
+                name="notify_subscription_matches",
+            )
             job_queue.run_daily(
                 send_daily_ranking_to_store,
                 time=dt_time(hour=DAILY_RANKING_HOUR, minute=0, tzinfo=timezone.utc),
