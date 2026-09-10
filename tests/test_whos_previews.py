@@ -21,7 +21,7 @@ class WhosPreviewTests(unittest.TestCase):
         good.raise_for_status = mock.Mock()
         bad = mock.Mock(status_code=200, content=b'html', headers={'Content-Type': 'text/html'})
         bad.raise_for_status = mock.Mock()
-        with tempfile.TemporaryDirectory() as tmp, mock.patch('scrapers.whos_tv.requests.get', side_effect=[good, bad]):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch('scrapers.whos_tv.cffi_requests.get', side_effect=[good, bad]):
             out = download_match_previews(matches, tmp, limit=3, max_bytes=100)
             self.assertEqual(len(out), 1)
             self.assertEqual(out[0]['code'], 'A-001')
@@ -31,7 +31,7 @@ class WhosPreviewTests(unittest.TestCase):
         match=[{'code':'A-001','preview':'https://img.test/a.webp'}]
         response=mock.Mock(status_code=200,headers={'Content-Type':'image/webp'})
         response.raise_for_status=mock.Mock(); response.iter_content.return_value=[b'a'*60,b'b'*60]
-        with tempfile.TemporaryDirectory() as tmp, mock.patch('scrapers.whos_tv.requests.get',return_value=response):
+        with tempfile.TemporaryDirectory() as tmp, mock.patch('scrapers.whos_tv.cffi_requests.get',return_value=response):
             out=download_match_previews(match,tmp,max_bytes=100)
             self.assertEqual(out,[])
             self.assertEqual(list(Path(tmp).iterdir()),[])

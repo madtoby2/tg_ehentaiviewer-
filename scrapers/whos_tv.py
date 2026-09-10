@@ -3,16 +3,24 @@
 Uses the site's authenticated web endpoints and returns a small, stable result
 shape for the Telegram bot. Credentials are supplied by the caller and are
 never logged or persisted here.
+
+Transport notes (learned the hard way):
+* Whos.tv sits behind Cloudflare, so plain ``requests`` gets ``403`` on
+  ``/upload-search`` — the session must impersonate Chrome (curl_cffi).
+* The upload endpoint expects a real ``multipart/form-data`` body, which is why
+  ``CurlMime`` is used instead of ``requests``-style ``files=``.
 """
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
-import requests
+from curl_cffi import CurlMime
+from curl_cffi import requests as cffi_requests
 from bs4 import BeautifulSoup
 from PIL import Image
 
@@ -96,6 +104,7 @@ class WhosTvClient:
         upload_timeout: int = 90,
         max_wait: int = 60,
         poll_interval: float = 2.0,
+        session_factory=None,
     ):
         self.username = username
         self.password = password
@@ -103,7 +112,8 @@ class WhosTvClient:
         self.upload_timeout = upload_timeout
         self.max_wait = max_wait
         self.poll_interval = poll_interval
-        self.session = requests.Session()
+        factory = session_factory or cffi_requests.Session
+        self.session = factory(impersonate='chrome')
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/131 Safari/537.36",
             "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.7",
@@ -125,20 +135,41 @@ class WhosTvClient:
         if payload.get("code") not in _SUCCESS_CODES:
             raise RuntimeError(payload.get("message") or "Whos.tv login failed")
 
+    def profile(self) -> dict:
+        response = self.session.get(f"{BASE_URL}/api/user/profile", timeout=self.request_timeout)
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("code") not in _SUCCESS_CODES:
+            raise RuntimeError(payload.get("message") or "Whos.tv profile failed")
+        return payload.get("data") or {}
+
+    def can_search(self, action: str = "search_screenshot") -> dict:
+        response = self.session.get(
+            f"{BASE_URL}/api/user/points/can-search", params={"action": action},
+            timeout=self.request_timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("code") not in _SUCCESS_CODES:
+            raise RuntimeError(payload.get("message") or "Whos.tv point check failed")
+        return payload.get("data") or {}
+
     def _upload(self, image_path: str) -> str:
-        with open(image_path, "rb") as image:
+        multipart = CurlMime()
+        multipart.addpart(
+            name="file", filename=Path(image_path).name, local_path=image_path)
+        try:
             response = self.session.post(
-                f"{BASE_URL}/upload-search",
-                files={"file": (Path(image_path).name, image)},
+                f"{BASE_URL}/upload-search", multipart=multipart,
                 headers={"Accept": "text/plain,*/*", "X-Requested-With": "XMLHttpRequest"},
-                timeout=self.upload_timeout,
-                allow_redirects=False,
+                timeout=self.upload_timeout, allow_redirects=False,
             )
+        finally:
+            multipart.close()
         response.raise_for_status()
         return response.text.strip()
 
-    def search(self, image_path: str) -> dict:
-        self.login()
+    def search_authenticated(self, image_path: str) -> dict:
         wait_url = self._upload(image_path)
         if "login=1" in wait_url:
             # Session may have expired between login and upload. Refresh once.
@@ -170,6 +201,65 @@ class WhosTvClient:
             raise RuntimeError(f"Whos.tv search failed: {result_url[:120]}")
         raise TimeoutError(f"Whos.tv search timed out after {self.max_wait}s")
 
+    def search(self, image_path: str) -> dict:
+        self.login()
+        return self.search_authenticated(image_path)
+
+
+def load_accounts(path: str, primary_username: str = '', primary_password: str = '') -> list[dict]:
+    """Primary credentials first, then the shared pool file (deduplicated)."""
+    accounts: list[dict] = []
+    if primary_username and primary_password:
+        accounts.append({'username': primary_username, 'password': primary_password})
+    if path:
+        source = Path(path)
+        if source.exists():
+            try:
+                data = json.loads(source.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                data = []
+            if isinstance(data, list):
+                for item in data:
+                    if not isinstance(item, dict):
+                        continue
+                    username = str(item.get('username') or '').strip()
+                    password = str(item.get('password') or '')
+                    if not username or not password:
+                        continue
+                    if any(existing['username'].lower() == username.lower() for existing in accounts):
+                        continue
+                    accounts.append({'username': username, 'password': password})
+    return accounts
+
+
+class WhosAccountPool:
+    """Try pooled accounts in order, skipping accounts without search points."""
+
+    def __init__(self, accounts: list[dict], *, client_factory=WhosTvClient):
+        self.accounts = list(accounts)
+        self.client_factory = client_factory
+
+    def search(self, image_path: str) -> dict | None:
+        errors = []
+        for index, account in enumerate(self.accounts, start=1):
+            client = self.client_factory(account['username'], account['password'])
+            try:
+                client.login()
+                eligibility = client.can_search()
+                if not eligibility.get('can_search'):
+                    continue
+                result = client.search_authenticated(image_path)
+                if result is not None:
+                    return {**result, 'account_index': index,
+                            'points_balance': eligibility.get('points_balance')}
+            except Exception as exc:
+                errors.append(f'{type(exc).__name__}: {exc}')
+            finally:
+                client.close()
+        if errors:
+            raise RuntimeError('Whos.tv account pool failed: ' + '; '.join(errors[-3:]))
+        return None
+
 
 def download_match_previews(matches, directory, limit: int = 3, max_bytes: int = 8 * 1024 * 1024):
     """Download a bounded set of Whos.tv matched frames for visual confirmation."""
@@ -187,7 +277,7 @@ def download_match_previews(matches, directory, limit: int = 3, max_bytes: int =
         target = None
         raw_target = None
         try:
-            response = requests.get(url, timeout=20, stream=True)
+            response = cffi_requests.get(url, timeout=20, stream=True, impersonate='chrome')
             response.raise_for_status()
             if not response.headers.get("Content-Type", "").lower().startswith("image/"):
                 continue
@@ -224,14 +314,16 @@ def download_match_previews(matches, directory, limit: int = 3, max_bytes: int =
     return output
 
 
-def search(username: str, password: str, image_path: str) -> dict | None:
-    if not username or not password:
+def search(username: str, password: str, image_path: str, *, accounts_file: str = '',
+           client_factory=None) -> dict | None:
+    """Search via the pooled accounts (``accounts_file``) or one primary account."""
+    accounts = load_accounts(accounts_file, username, password)
+    if not accounts:
         return None
-    client = WhosTvClient(username, password)
+    kwargs = {'client_factory': client_factory} if client_factory else {}
+    pool = WhosAccountPool(accounts, **kwargs)
     try:
-        return client.search(image_path)
+        return pool.search(image_path)
     except Exception as exc:
         logger.warning("Whos.tv search failed: %s: %s", type(exc).__name__, exc)
         return None
-    finally:
-        client.close()

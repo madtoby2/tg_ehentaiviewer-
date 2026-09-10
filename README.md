@@ -35,7 +35,7 @@ Telegram bot — 发链接直接看图：支持 **EHentai** 与 **18comic**（�
 - `🏆 当日排行` — 热门排行（仅管理员可见）
 
 **任意图片查出处：** 直接发图片给 bot（私聊直接发；群里需 @bot 或回复 bot），也支持以**文件**发送的 JPG/PNG/WebP 原图。并行聚合：
-- **Whos.tv**：AV 截图专用识别，直接返回番号、相似度、匹配帧与精准时间点（需配置专用账号；低于 `WHOS_TV_MIN_SIMILARITY` 只作为画面候选展示，不宣称命中）
+- **Whos.tv**：AV 截图专用识别，直接返回番号、相似度、匹配帧与精准时间点。按账号池顺序逐个检查积分，跳过积分不足的账号（需配置单账号或账号池；低于 `WHOS_TV_MIN_SIMILARITY` 只作为画面候选展示，不宣称命中）
 - **Yandex Images**：通用相似图和网页来源，适合真人、AV 截图、商品、表情包等
 - **trace.moe**：动画截图识别，返回动画名、集数、时间点和预览（同名歧义结果会被拒绝）
 - **本地 OCR**：提取番号（如 `SSIS-123`）、水印、字幕等文字线索
@@ -61,7 +61,7 @@ Telegram bot — 发链接直接看图：支持 **EHentai** 与 **18comic**（�
 ## 安装
 
 ```bash
-pip install -r requirements.txt  # python-telegram-bot cloudscraper requests beautifulsoup4 lxml jmcomic python-dotenv
+pip install -r requirements.txt  # python-telegram-bot cloudscraper requests beautifulsoup4 lxml jmcomic python-dotenv curl_cffi
 ```
 
 配置环境变量（`.env`）：
@@ -88,6 +88,7 @@ EHBOT_STATIC_IMAGE_TTL_SECONDS=86400
 # 以图搜图
 WHOS_TV_USERNAME=            # Whos.tv 专用账号（登录与 Session 续期由 bot 自动完成）
 WHOS_TV_PASSWORD=
+WHOS_TV_ACCOUNTS_FILE=       # 共享 Whos.tv 账号池文件（留空 = 只用上面的单账号）
 WHOS_TV_MIN_SIMILARITY=90    # 低于此相似度不宣称 AV 番号命中
 SAUCENAO_API_KEY=            # 可选，多个 key 逗号分隔
 
@@ -139,6 +140,24 @@ subscriptions.json            # 订阅项（运行时生成）
 subscription_notify_state.json# 订阅推送幂等状态（运行时生成）
 usage_limits.json             # 每日配额计数（运行时生成）
 ```
+
+## Whos.tv 账号池（与搜索 bot 共享）
+
+Whos.tv 每次图搜扣积分，账号是消耗品。本 bot 不再只依赖一个账号，而是直接复用搜索 bot 的账号池文件：
+
+```ini
+WHOS_TV_ACCOUNTS_FILE=/opt/searchbot/whos_accounts.json
+```
+
+行为：
+- 按顺序逐个账号 `登录 → /api/user/points/can-search` → 只对积分充足的账号上传一次图片
+- 积分不足的账号直接跳过；某个账号登录/搜索报错也不会中断，继续试下一个
+- 全部不可用时不输出任何 AV 结论（只保留 Yandex 等通用结果），不会假报命中
+- 单账号模式（只填 `WHOS_TV_USERNAME/PASSWORD`）行为不变
+
+账号池的上游维护在搜索 bot 侧：每天自动补 5 个新账号（`whos_daily_register.py`）+ 每日任务回补积分（`whos_daily_signin.py`）。`/health` 会显示池内账号数、当前账号积分和单次消耗。
+
+> 传输层：Whos.tv 在 Cloudflare 后面，普道 `requests` 上传会直接 `403`，所以这里用 `curl_cffi` 的 Chrome 指纹 + 原生 multipart（`CurlMime`），依赖已在 `requirements.txt`。
 
 ## 群组模式
 

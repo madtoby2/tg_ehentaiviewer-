@@ -9,6 +9,7 @@ import sys
 import json
 import html
 import asyncio
+import functools
 import logging
 import tempfile
 from datetime import datetime, timezone, timedelta
@@ -33,7 +34,9 @@ from scrapers.iqdb import search_hard_timeout as iqdb_search
 from scrapers.trace_moe import search as trace_moe_search
 from scrapers.yandex_images import search as yandex_image_search, download_previews as yandex_download_previews
 from scrapers.screenshot_ocr import ocr as screenshot_ocr, extract_av_codes
-from scrapers.whos_tv import search as whos_tv_search, download_match_previews as whos_download_previews
+from scrapers.whos_tv import (search as whos_tv_search,
+                              download_match_previews as whos_download_previews,
+                              load_accounts as whos_tv_load_accounts, WhosTvClient)
 
 from publishers.jm_telegraph import publish_jm_gallery, publish_eh_gallery
 
@@ -62,6 +65,10 @@ SAUCENAO_API_KEYS = [k.strip() for k in os.environ.get('SAUCENAO_API_KEY', '').s
 WHOS_TV_USERNAME = os.getenv("WHOS_TV_USERNAME", "").strip()
 WHOS_TV_PASSWORD = os.getenv("WHOS_TV_PASSWORD", "").strip()
 WHOS_TV_MIN_SIMILARITY = float(os.getenv("WHOS_TV_MIN_SIMILARITY", "90"))
+# 共享 Whos.tv 账号池（与搜索 bot 共用同一份文件）
+WHOS_TV_ACCOUNTS_FILE = os.getenv("WHOS_TV_ACCOUNTS_FILE", "").strip()
+WHOS_TV_ENABLED = bool(WHOS_TV_USERNAME and WHOS_TV_PASSWORD) or bool(
+    WHOS_TV_ACCOUNTS_FILE and Path(WHOS_TV_ACCOUNTS_FILE).exists())
 _sn_key_index = 0
 
 
@@ -682,10 +689,12 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         whos_index = None
         whos_future = None
-        if WHOS_TV_USERNAME and WHOS_TV_PASSWORD:
+        if WHOS_TV_ENABLED:
             whos_index = len(tasks)
             whos_future = loop.run_in_executor(
-                None, whos_tv_search, WHOS_TV_USERNAME, WHOS_TV_PASSWORD, str(img_path)
+                None, functools.partial(
+                    whos_tv_search, WHOS_TV_USERNAME, WHOS_TV_PASSWORD, str(img_path),
+                    accounts_file=WHOS_TV_ACCOUNTS_FILE),
             )
             tasks.append(whos_future)
         sn_key = _next_saucenao_key()
@@ -1073,20 +1082,29 @@ def _health_probe():
         result['catbox'] = (response.status_code < 500, f"HTTP {response.status_code}")
     except Exception as exc:
         result['catbox'] = (False, type(exc).__name__)
-    if WHOS_TV_USERNAME and WHOS_TV_PASSWORD:
+    if WHOS_TV_ENABLED:
         try:
-            with requests.Session() as session:
-                login = session.post('https://whos.tv/api/login', json={
-                    'username': WHOS_TV_USERNAME, 'password': WHOS_TV_PASSWORD,
-                }, timeout=10)
-                login.raise_for_status()
-                profile = session.get('https://whos.tv/api/user/profile', timeout=10).json().get('data') or {}
-                allowed = session.get(
-                    'https://whos.tv/api/user/points/can-search?action=search_screenshot', timeout=10,
-                ).json().get('data') or {}
-                points = profile.get('points_balance', '?')
-                required = allowed.get('required_points', '?')
-                result['whos'] = (bool(allowed.get('can_search')), f"{points}积分，单次{required}积分")
+            accounts = whos_tv_load_accounts(
+                WHOS_TV_ACCOUNTS_FILE, WHOS_TV_USERNAME, WHOS_TV_PASSWORD)
+            ok = False
+            detail = ''
+            for account in accounts:
+                client = WhosTvClient(account['username'], account['password'])
+                try:
+                    client.login()
+                    allowed = client.can_search()
+                    if not allowed.get('can_search'):
+                        continue
+                    profile = client.profile()
+                    ok = True
+                    detail = (f"{len(accounts)}个账号，当前 {profile.get('points_balance')}积分，"
+                              f"单次{allowed.get('required_points')}积分")
+                    break
+                finally:
+                    client.close()
+            if not ok:
+                detail = f'{len(accounts)}个账号，均积分不足' if accounts else '未配置'
+            result['whos'] = (ok, detail)
         except Exception as exc:
             result['whos'] = (False, type(exc).__name__)
     else:
