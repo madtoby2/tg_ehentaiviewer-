@@ -30,6 +30,7 @@ class BotWhosPoolTests(unittest.TestCase):
     def _reload(self, **env):
         env.setdefault('WHOS_TV_USERNAME', '')
         env.setdefault('WHOS_TV_PASSWORD', '')
+        env.setdefault('WHOS_TV_ACCOUNTS_FILE', '')
         for key, value in env.items():
             os.environ[key] = value
         return importlib.reload(bot)
