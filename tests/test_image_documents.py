@@ -19,6 +19,7 @@ class ImageDocumentTests(unittest.TestCase):
         os.environ['EHBOT_TELEGRAM_TOKEN']='x'
         os.environ['WHOS_TV_USERNAME']=''
         os.environ['WHOS_TV_PASSWORD']=''
+        os.environ['WHOS_TV_ACCOUNTS_FILE']=''
         importlib.reload(bot)
 
     def tearDown(self):
@@ -31,10 +32,15 @@ class ImageDocumentTests(unittest.TestCase):
         update=Update(update_id=1,message=msg)
         ctx=mock.Mock(); fake=mock.Mock(); fake.download_to_drive=mock.AsyncMock(); ctx.bot.get_file=mock.AsyncMock(return_value=fake)
         ctx.bot.send_media_group=mock.AsyncMock(); ctx.bot.send_photo=mock.AsyncMock(); ctx.bot.username='bot'; ctx.bot.id=1
-        with mock.patch('bot.iqdb_search',return_value=[]), mock.patch('bot.trace_moe_search',return_value=[]), \
-             mock.patch('bot.yandex_image_search',return_value=None), mock.patch('bot.screenshot_ocr',return_value=''), \
-             mock.patch.object(bot,'consume_daily_quota',return_value=(True,9)), \
-             mock.patch.object(Message,'reply_text',new=mock.AsyncMock()) as reply:
+        with (
+            mock.patch('bot.iqdb_search',return_value=[]),
+            mock.patch('bot.trace_moe_search',return_value=[]),
+            mock.patch('bot.yandex_image_search',return_value=None),
+            mock.patch('bot.screenshot_ocr',return_value=''),
+            mock.patch('bot.whos_tv_search',return_value={'matches': []}),
+            mock.patch.object(bot,'consume_daily_quota',return_value=(True,9)),
+            mock.patch.object(Message,'reply_text',new=mock.AsyncMock()) as reply,
+        ):
             reply.return_value.edit_text=mock.AsyncMock(); asyncio.run(bot.handle_photo(update,ctx))
         ctx.bot.get_file.assert_awaited_once_with('D1')
         self.assertIn('未找到匹配',reply.return_value.edit_text.await_args.args[0])

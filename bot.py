@@ -44,6 +44,8 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+# httpx INFO logs include the full Bot API URL, which embeds the bot token.
+logging.getLogger('httpx').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.environ.get('EHBOT_TELEGRAM_TOKEN', '')

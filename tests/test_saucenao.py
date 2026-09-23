@@ -136,6 +136,7 @@ class PhotoHandlerTests(unittest.TestCase):
         # them; bot.py loads local .env during import.
         env.setdefault("WHOS_TV_USERNAME", "")
         env.setdefault("WHOS_TV_PASSWORD", "")
+        env.setdefault("WHOS_TV_ACCOUNTS_FILE", "")
         _set_env2(**env)
         return importlib.reload(bot)
 
@@ -287,6 +288,7 @@ class PhotoHandlerTests(unittest.TestCase):
 
     def test_whos_match_previews_are_sent_as_album(self):
         self._reload(EHBOT_TELEGRAM_TOKEN="x", WHOS_TV_USERNAME="user", WHOS_TV_PASSWORD="secret")
+        ris_before = set(Path('/tmp').glob('ris_*'))
         update = self._photo_update(); ctx = self._ctx()
         whos = {"result_url": "https://whos.tv/search-img/t", "matches": [
             {"code": f"A-{i:03d}", "similarity": 99-i, "at": "00:01:00",
@@ -320,7 +322,7 @@ class PhotoHandlerTests(unittest.TestCase):
         self.assertIn('A-001',second['caption'])
         self.assertEqual(second['reply_markup'].inline_keyboard[0][0].url,'https://whos.tv/videos/a-001')
         self.assertEqual(first['parse_mode'],'HTML')
-        self.assertEqual([p for p in Path('/tmp').glob('ris_*') if p.is_dir()],[])
+        self.assertEqual(set(Path('/tmp').glob('ris_*')), ris_before)
 
     def test_general_image_results_include_yandex_anime_and_av_code(self):
         """Any screenshot gets a Yandex result page; anime and AV clues are shown when detected."""
@@ -352,6 +354,7 @@ class PhotoHandlerTests(unittest.TestCase):
 
     def test_yandex_previews_are_sent_as_album(self):
         self._reload(EHBOT_TELEGRAM_TOKEN="x")
+        ris_before = set(Path('/tmp').glob('ris_*'))
         update = self._photo_update()
         ctx = self._ctx()
         sites = [
@@ -380,7 +383,7 @@ class PhotoHandlerTests(unittest.TestCase):
         self.assertEqual(len(media), 2)
         self.assertIn('Match 0', media[0].caption)
         # Files are closed and the outer finally removes the entire task dir.
-        self.assertEqual([p for p in Path('/tmp').glob('ris_*') if p.is_dir()], [])
+        self.assertEqual(set(Path('/tmp').glob('ris_*')), ris_before)
 
     def test_single_yandex_preview_uses_send_photo(self):
         self._reload(EHBOT_TELEGRAM_TOKEN='x')
@@ -410,6 +413,7 @@ class PhotoHandlerTests(unittest.TestCase):
     def test_timeout_cleans_tempdir_and_releases_lock(self):
         """Timeout/error paths must delete ris_* files and release the user lock."""
         self._reload(EHBOT_TELEGRAM_TOKEN="x")
+        ris_before = set(Path('/tmp').glob('ris_*'))
         update = self._photo_update(user_id=777)
         ctx = self._ctx()
         with mock.patch("bot.iqdb_search", side_effect=TimeoutError("hard deadline")), \
@@ -422,8 +426,8 @@ class PhotoHandlerTests(unittest.TestCase):
         self.assertTrue(status_edit.await_count >= 1)
         self.assertIn("未找到匹配", status_edit.await_args.args[0])
         import glob
-        leftovers = [p for p in glob.glob("/tmp/ris_*") if os.path.isdir(p)]
-        self.assertEqual(leftovers, [])
+        leftovers = {Path(p) for p in glob.glob("/tmp/ris_*") if os.path.isdir(p)}
+        self.assertEqual(leftovers - ris_before, set())
 
 def _set_env2(**kw):
     import os
