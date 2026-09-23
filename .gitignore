@@ -10,6 +10,10 @@ subscription_notify_state.json
 .hermes-tmp.*
 .telegraph_token.json
 
+reader_history.sqlite3
+reader_history.sqlite3-shm
+reader_history.sqlite3-wal
+
 # Python cache
 __pycache__/
 *.pyc

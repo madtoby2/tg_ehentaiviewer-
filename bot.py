@@ -39,6 +39,7 @@ from scrapers.whos_tv import (search as whos_tv_search,
                               load_accounts as whos_tv_load_accounts, WhosTvClient)
 
 from publishers.jm_telegraph import publish_jm_gallery, publish_eh_gallery
+from history_store import ReaderHistoryStore
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -83,6 +84,7 @@ def _next_saucenao_key() -> str | None:
     _sn_key_index += 1
     return key
 USAGE_FILE = Path(os.environ.get('EHBOT_USAGE_FILE', '/root/eh-reader-bot/usage_limits.json'))
+HISTORY_FILE = Path(os.environ.get('EHBOT_HISTORY_FILE', str(Path(__file__).resolve().parent / 'reader_history.sqlite3')))
 
 RANKING_CACHE_FILE = Path(os.environ.get('EHBOT_RANKING_CACHE_FILE', '/root/eh-reader-bot/ranking_cache.json'))
 SUBSCRIPTIONS_FILE = Path(os.environ.get('EHBOT_SUBSCRIPTIONS_FILE', '/root/eh-reader-bot/subscriptions.json'))
@@ -105,6 +107,29 @@ GURO_TAGS_EH = {
 GURO_TAGS_CN = {'獵奇', '血腥', '暴力', '排泄', '屎', '尿', '蟲', '怪物'}
 KOREAN_TAGS = {'韓漫', 'korean', '한국', 'manhwa'}
 AI_TAGS = {'ai', 'ai:generated', 'ai:art', 'ai:assisted', 'ai:generated', 'generated', 'ai art', '人工智能'}
+
+def _history() -> ReaderHistoryStore:
+    return ReaderHistoryStore(HISTORY_FILE)
+
+
+async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not chat_allowed(update):
+        await update.effective_message.reply_text('⚠️ 你没有权限使用此 bot')
+        return
+    user_id = update.effective_user.id if update.effective_user else 0
+    rows = _history().list_for(user_id)
+    if not rows:
+        await update.effective_message.reply_text('📚 还没有阅读记录。发 EH / 18comic 链接后会自动保存在这里。')
+        return
+    lines = ['📚 <b>我的阅读记录</b>', '']
+    buttons = []
+    for i, row in enumerate(rows, 1):
+        title = html.escape(str(row['title']))
+        source = html.escape(str(row['source']))
+        lines.append(f'{i}. {source} · <a href="{row["reader_url"]}">{title}</a> · {row["page_count"]}页')
+    await update.effective_message.reply_text('\n'.join(lines), parse_mode='HTML',
+        disable_web_page_preview=True)
+
 
 def _has_ai_tags(tags: list[str]) -> bool:
     """Check if any tag indicates AI-generated content."""
@@ -367,7 +392,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # routed by handle_menu_button.
     rows = [
         [KeyboardButton("🎲 随机推荐"), KeyboardButton("🔍 标签搜索")],
-        [KeyboardButton("🖼 图片搜索"), KeyboardButton("📊 今日额度")],
+        [KeyboardButton("🖼 图片搜索"), KeyboardButton("📚 我的记录")],
+        [KeyboardButton("📊 今日额度")],
     ]
     if is_owner(user_id):
         rows.append([KeyboardButton("🏆 当日排行")])
@@ -431,6 +457,7 @@ MENU_ROUTES = {
     "🏆 当日排行": "handle_ranking",
     "📊 今日额度": "daily_command",
     "🖼 图片搜索": "image_search_prompt",
+    "📚 我的记录": "history_command",
 }
 
 
@@ -606,12 +633,16 @@ async def _process(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str,
     source_emoji = "🔞" if is_eh_link(url) else "📖"
     source_name = "E-Hentai" if is_eh_link(url) else "18comic"
 
+    user_id = update.effective_user.id if update.effective_user else 0
+    _history().record(user_id, source_name, url, title, page_url, pages)
     msg = (
         f"{source_emoji} <a href=\"{page_url}\">{title}</a>\n"
-        f"📄 {published}/{pages} 页"
+        f"📄 {published}/{pages} 页\n"
+        "已保存到阅读记录"
     )
     # effective_message works for both plain messages and callback triggers
-    await update.effective_message.reply_text(msg, parse_mode='HTML', disable_web_page_preview=True)
+    await update.effective_message.reply_text(msg, parse_mode='HTML', disable_web_page_preview=True,
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('📚 我的记录', callback_data='history')]]))
 
 
 class _CallbackStatus:
@@ -2227,6 +2258,7 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("daily", daily_command))
     app.add_handler(CommandHandler("stats", stats_command))
+    app.add_handler(CommandHandler("history", history_command))
     app.add_handler(CommandHandler("health", health_command))
     app.add_handler(CommandHandler("subscribe", subscribe_command))
     app.add_handler(CommandHandler("unsubscribe", unsubscribe_command))
@@ -2241,6 +2273,7 @@ def main():
     app.add_handler(CallbackQueryHandler(handle_search_results_back, pattern="^search_results_back$"))
     app.add_handler(CallbackQueryHandler(handle_search_pick, pattern="^search_pick_"))
     app.add_handler(CallbackQueryHandler(handle_back_to_start, pattern="^back_to_start$"))
+    app.add_handler(CallbackQueryHandler(history_command, pattern="^history$"))
     app.add_handler(CallbackQueryHandler(handle_ris_read, pattern="^ris_read:"))
     # Fixed reply-keyboard buttons (custom keyboard) — must run before the
     # generic search/message handlers.
